@@ -1,47 +1,41 @@
--- Step 1: Get all week periods from booking table
-WITH WeekPeriods AS (
-    SELECT DISTINCT 
-        FromDate, 
-        ToDate, 
-        FORMAT(BookedOn, 'MMMM yyyy') AS [Month]
-    FROM dbo.TRN_TimeBooking
-),
-
--- Step 2: WeeklyStatus (optional: summarize booked/approved hours per week)
-WeeklyStatus AS (
+-- CTE for weekly status (if needed for status calculation)
+WITH WeeklyStatus AS (
     SELECT
         tb.Emp_ID,
         tb.FromDate,
         tb.ToDate,
         SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
         SUM(CASE 
-                WHEN ISNULL(tb.PMApproval, 0) = 1 THEN ISNULL(bd.BookedHours, 0) 
-                ELSE 0 
-            END) AS ApprovedHours
+            WHEN ISNULL(tb.PMApproval, 0) = 1 THEN ISNULL(bd.BookedHours, 0) 
+            ELSE 0 
+        END) AS ApprovedHours
     FROM dbo.TRN_TimeBooking tb
     JOIN dbo.TRN_BookedDate bd ON tb.TimeBooking_Id = bd.TimeBooking_Id
     GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
 )
 
--- Final report
-SELECT 
-    mu.EmployeeName AS BookedBy,
-    mu.EmailId AS BookedByEmail,
-    mu.JobTitle,
-    mu.EmpGrade,
-    mu.EmpDept,
+SELECT
+    tb.Emp_ID,
+    tb.TimeBooking_Id AS [Timesheet No],
 
-    wp.FromDate,
-    wp.ToDate,
-    wp.Month,
+    -- Approvers' Names
+    dhUser.EmployeeName AS [Approver HH Name],
+    pmUser.EmployeeName AS [Approver PM Name],
 
+    mu.EmployeeName AS [Employee Name],
+    mu.UserType AS [Employee Type],
+    mu.EmpDept AS [Department],
+    tb.FromDate,
+    tb.ToDate,
+    bd.Date AS [Transaction Date],
+    bd.BookedHours,
     tb.ProjectNo,
-    pb.Project_Description AS ProjectDescription,
+    pb.Project_Description AS [Project Description],
     tb.WBSNo,
     pb.WBS_Description,
     tb.PO,
     tb.BookedOn,
-    lr.Rate AS LabourRate,
+    lr.Rate AS [Labour Rate],
 
     -- Status
     CASE 
@@ -54,18 +48,21 @@ SELECT
         WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 THEN 'HH rejected'
         WHEN tb.IsSubmitted = 0 THEN 'Not Submitted'
         ELSE 'Unknown'
-    END AS Status
+    END AS Status,
 
-FROM dbo.MST_User mu
-CROSS JOIN WeekPeriods wp
-LEFT JOIN dbo.TRN_TimeBooking tb 
-    ON mu.EmpNo = tb.Emp_ID 
-    AND tb.FromDate = wp.FromDate 
-    AND tb.ToDate = wp.ToDate
-LEFT JOIN dbo.TRN_BookedDate bd 
-    ON tb.TimeBooking_Id = bd.TimeBooking_Id
-LEFT JOIN dbo.ProjectBudget pb 
-    ON tb.ProjectNo = pb.Project_code AND tb.WBSNo = pb.WBS_Number
+    -- Report Timestamp
+    CAST(GETDATE() AS DATE) AS [Report Date],
+    FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
+
+    -- Month of timecard
+    FORMAT(tb.FromDate, 'MMMM yyyy') AS [Month (for which the timecard is submitted)]
+
+FROM dbo.TRN_TimeBooking tb
+LEFT JOIN dbo.TRN_BookedDate bd ON tb.TimeBooking_Id = bd.TimeBooking_Id
+LEFT JOIN dbo.MST_User mu ON tb.Emp_ID = mu.EmpNo
+LEFT JOIN dbo.MST_User dhUser ON tb.ApprovedByDH = dhUser.UserName
+LEFT JOIN dbo.MST_User pmUser ON tb.ApprovedByPM = pmUser.UserName
+LEFT JOIN dbo.ProjectBudget pb ON tb.ProjectNo = pb.Project_code AND tb.WBSNo = pb.WBS_Number
 LEFT JOIN dbo.MST_LabourRate lr 
     ON lr.Department = mu.EmpDept 
     AND lr.EmployeeType = mu.UserType
@@ -78,4 +75,4 @@ LEFT JOIN WeeklyStatus ws
     AND ws.ToDate = tb.ToDate
 
 WHERE mu.IsActive = 1
-ORDER BY wp.FromDate, mu.EmployeeName;
+ORDER BY mu.EmployeeName, tb.FromDate;
