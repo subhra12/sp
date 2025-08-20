@@ -1,3 +1,73 @@
+-- Step 1: CTE to calculate weekly status for employees who have bookings
+WITH WeeklyStatus AS (
+    SELECT
+        tb.Emp_ID,
+        DATEPART(YEAR, tb.BookedOn) AS BookingYear,
+        DATEPART(WEEK, tb.BookedOn) AS BookingWeek,
+        SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
+        SUM(CASE 
+                WHEN ISNULL(tb.PMApproval, 0) = 1 THEN ISNULL(bd.BookedHours, 0) 
+                ELSE 0 
+            END) AS ApprovedHours
+    FROM dbo.TRN_TimeBooking tb
+    JOIN dbo.TRN_BookedDate bd ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    GROUP BY tb.Emp_ID, DATEPART(YEAR, tb.BookedOn), DATEPART(WEEK, tb.BookedOn)
+)
+
+-- Step 2: Main query starting from MST_User (all employees)
+SELECT 
+    tb.ProjectNo,
+    pb.Project_Description AS ProjectDescription,
+    tb.WBSNo,
+    pb.WBS_Description,
+    tb.PO,
+    tb.BookedOn,
+    lr.Rate AS LabourRate,
+
+    -- Status (only meaningful if tb is not null)
+    CASE 
+        WHEN tb.Emp_ID IS NULL THEN 'Not Booked'
+        WHEN ws.TotalHours >= 40 AND ws.ApprovedHours > 0 AND ws.ApprovedHours < ws.TotalHours THEN 'Partial Approved'
+        WHEN tb.IsApproved = 1 AND tb.DHApproval = 1 AND tb.PMApproval = 1 THEN 'Approved'
+        WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 THEN 'Pending with HH'
+        WHEN tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) THEN 'Pending with PM'
+        WHEN tb.IsSubmitted = 0 THEN 'Not Booked'
+        WHEN tb.DHApproval = 1 AND tb.PMApproval = 0 THEN 'PM rejected'
+        WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 THEN 'HH rejected'
+        ELSE 'Unknown'
+    END AS Status,
+
+    tb.CreatedOn AS ReportDate,
+    FORMAT(tb.TruncateTime, 'hh:mm') AS ReportTime,
+    FORMAT(tb.BookedOn, 'MMMM yyyy') AS [Month],
+
+    -- User Info (always available from MST_User)
+    mu.EmployeeName AS BookedBy,
+    mu.EmailId AS BookedByEmail,
+    mu.JobTitle,
+    mu.EmpGrade,
+    mu.EmpDept
+
+FROM dbo.MST_User mu
+LEFT JOIN dbo.TRN_TimeBooking tb 
+    ON mu.EmpNo = tb.Emp_ID
+LEFT JOIN dbo.TRN_BookedDate bd 
+    ON tb.TimeBooking_Id = bd.TimeBooking_Id
+LEFT JOIN dbo.ProjectBudget pb 
+    ON tb.ProjectNo = pb.Project_code AND tb.WBSNo = pb.WBS_Number
+LEFT JOIN dbo.MST_LabourRate lr 
+    ON lr.Department = mu.EmpDept 
+    AND lr.EmployeeType = mu.UserType
+    AND lr.Grade = mu.EmpGrade
+    AND tb.BookedOn >= lr.FromDate 
+    AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
+LEFT JOIN WeeklyStatus ws 
+    ON ws.Emp_ID = tb.Emp_ID
+    AND DATEPART(YEAR, tb.BookedOn) = ws.BookingYear
+    AND DATEPART(WEEK, tb.BookedOn) = ws.BookingWeek
+
+WHERE mu.IsActive = 1
+ORDER BY tb.BookedOn DESC;
 -- Step 1: CTE for weekly booked and approved hours
 WITH WeeklyStatus AS (
     SELECT
@@ -71,3 +141,4 @@ LEFT JOIN WeeklyStatus ws
 
 WHERE tb.BookedOn IS NOT NULL
 ORDER BY tb.BookedOn DESC;
+
