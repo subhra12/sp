@@ -1,18 +1,3 @@
-===========================================
-
-AND (
-        tb.TimeBooking_Id IS NOT NULL   -- keep actual booked rows
-        OR NOT EXISTS (                 -- keep only true "Not Booked" weeks
-              SELECT 1 
-              FROM dbo.TRN_TimeBooking t2
-              WHERE t2.Emp_ID = mu.EmpNo
-                AND t2.FromDate = wp.FromDate
-                AND t2.ToDate = wp.ToDate
-          )
-      )
-
-==================================================
-
 ;WITH WeekPeriods AS (
     SELECT DISTINCT 
         FromDate, 
@@ -27,15 +12,29 @@ WeeklyStatus AS (
         tb.ToDate,
         SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
         SUM(CASE 
-                WHEN ISNULL(tb.PMApproval, 0) = 1 
-                     AND ISNULL(tb.DHApproval, 0) = 1 
-                THEN ISNULL(bd.BookedHours, 0) 
+                WHEN tb.DHApproval = 1 AND tb.PMApproval = 1 
+                     THEN ISNULL(bd.BookedHours, 0) 
                 ELSE 0 
             END) AS ApprovedHours
     FROM dbo.TRN_TimeBooking tb
     JOIN dbo.TRN_BookedDate bd 
         ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    WHERE tb.FromDate >= '2025-01-01' 
+      AND tb.ToDate <= '2025-08-15'
     GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
+),
+WeekDays AS (
+    SELECT 
+        wp.FromDate,
+        wp.ToDate,
+        d.DateValue
+    FROM WeekPeriods wp
+    CROSS APPLY (
+        SELECT DATEADD(DAY, v.number, wp.FromDate) AS DateValue
+        FROM master.dbo.spt_values v
+        WHERE v.type = 'P'
+          AND DATEADD(DAY, v.number, wp.FromDate) <= wp.ToDate
+    ) d
 )
 SELECT
     mu.EmpNo AS Emp_ID,
@@ -47,9 +46,10 @@ SELECT
     mu.EmployeeName AS [Employee Name],
     mu.UserType AS [Employee Type],
     mu.EmpDept AS [Department],
+
     wp.FromDate,
     wp.ToDate,
-    bd.Date AS [Transaction Date],
+    wd.DateValue AS [Transaction Date],
     bd.BookedHours,
     tb.ProjectNo,
     pb.ProjectDescription AS [Project Description],
@@ -59,87 +59,74 @@ SELECT
     tb.BookedOn,
     lr.Rate AS [Labour Rate],
 
-    -- Day-wise status
+    -- Status Logic
     CASE 
-        WHEN tb.TimeBooking_Id IS NULL 
-             THEN 'Not Booked'
-
-        -- Case A: Whole week all approved
+        WHEN tb.TimeBooking_Id IS NULL THEN 'Not Booked'
+        
+        -- Fully approved week
         WHEN ws.TotalHours > 0 
-             AND ws.ApprovedHours = ws.TotalHours
-             AND bd.BookedHours > 0
-             THEN 'Approved'
+             AND ws.ApprovedHours = ws.TotalHours 
+        THEN 'Approved'
 
-        -- Case B: Mix of approvals and pendings
-        WHEN ws.TotalHours > 0 
-             AND ws.ApprovedHours < ws.TotalHours
+        -- Already approved days (part of the week)
+        WHEN bd.BookedHours > 0 
              AND tb.DHApproval = 1 AND tb.PMApproval = 1 
-             AND bd.BookedHours > 0
-             THEN 'Partially Approved'   -- ✅ correction here
+        THEN 'Partially Approved'
 
-        WHEN ws.TotalHours > 0 
-             AND ws.ApprovedHours < ws.TotalHours
-             AND tb.DHApproval = 0 AND tb.IsSubmitted = 1
-             AND bd.BookedHours > 0
-             THEN 'Pending with HH'
+        -- Remaining days submitted but not yet approved
+        WHEN bd.BookedHours > 0 AND tb.IsSubmitted = 1 AND tb.DHApproval = 0 
+        THEN 'Pending with HH'
+        WHEN bd.BookedHours > 0 AND tb.IsSubmitted = 1 
+             AND tb.DHApproval = 1 
+             AND (tb.PMApproval IS NULL OR tb.PMApproval = 0)
+        THEN 'Pending with PM'
 
-        WHEN ws.TotalHours > 0 
-             AND ws.ApprovedHours < ws.TotalHours
-             AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0)
-             AND bd.BookedHours > 0
-             THEN 'Pending with PM'
+        -- Rejected cases
+        WHEN tb.IsRejected = 1 
+             AND (tb.PMRemark <> '' AND tb.PMRemark IS NOT NULL) 
+        THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 
+             AND (tb.DHRemark <> '' AND tb.DHRemark IS NOT NULL) 
+        THEN 'HH rejected'
 
-        -- Rejected flows
-        WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' 
-             THEN 'PM rejected'
-        WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' 
-             THEN 'HH rejected'
+        -- Draft
+        WHEN tb.IsSubmitted = 0 THEN 'Draft'
 
-        WHEN tb.IsSubmitted = 0 
-             THEN 'Draft'
         ELSE 'Unknown'
     END AS Status,
 
     -- Report Time
     CAST(GETDATE() AS DATE) AS [Report Date],
     FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
-
     wp.Month AS [Month (for which the timecard is submitted)]
 
 FROM dbo.MST_User mu
 CROSS JOIN WeekPeriods wp
-
+LEFT JOIN WeekDays wd 
+    ON wp.FromDate = wd.FromDate AND wp.ToDate = wd.ToDate
 LEFT JOIN dbo.TRN_TimeBooking tb 
     ON mu.EmpNo = tb.Emp_ID 
     AND tb.FromDate = wp.FromDate 
-    AND tb.ToDate   = wp.ToDate
-
+    AND tb.ToDate = wp.ToDate
 LEFT JOIN dbo.TRN_BookedDate bd 
     ON tb.TimeBooking_Id = bd.TimeBooking_Id
-   AND bd.BookedHours > 0
-
+   AND bd.Date = wd.DateValue
 LEFT JOIN dbo.Budget pb 
     ON tb.ProjectNo = pb.Projectcode 
-   AND tb.WBSNo    = pb.WBSNumber
-
+   AND tb.WBSNo = pb.WBSNumber
 LEFT JOIN dbo.MST_User dhUser 
     ON tb.ApprovedByDH = dhUser.EmpNo
 LEFT JOIN dbo.MST_User pmUser 
     ON tb.ApprovedByPM = pmUser.EmpNo
-
 LEFT JOIN dbo.MST_LabourRate lr 
-    ON lr.Department   = mu.EmpDept 
+    ON lr.Department = mu.EmpDept 
    AND lr.EmployeeType = mu.UserType
-   AND lr.Grade        = mu.EmpGrade
-   AND tb.BookedOn    >= lr.FromDate 
+   AND lr.Grade = mu.EmpGrade
+   AND tb.BookedOn >= lr.FromDate 
    AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
-
 LEFT JOIN WeeklyStatus ws 
-    ON ws.Emp_ID   = tb.Emp_ID
+    ON ws.Emp_ID = tb.Emp_ID
    AND ws.FromDate = tb.FromDate
-   AND ws.ToDate   = tb.ToDate
-
+   AND ws.ToDate = tb.ToDate
 WHERE mu.InactiveDate IS NULL
-  AND (bd.Date IS NOT NULL OR tb.TimeBooking_Id IS NULL)
-ORDER BY mu.EmployeeName, wp.FromDate, bd.Date;
-
+ORDER BY mu.EmployeeName, wp.FromDate, wd.DateValue;
