@@ -1,12 +1,3 @@
-
-========================================
-WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 THEN 'Pending with HH'
-        WHEN tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) THEN 'Pending with PM'
-         WHEN tb.IsRejected = 1 AND (tb.PMRemark<>'' or tb.PMRemark <>null ) THEN 'PM rejected'
-        WHEN tb.IsRejected = 1 AND (tb.DHRemark<>'' or tb.DHRemark <>null )THEN 'HH rejected'
-=====================================
-
-
 WITH WeekPeriods AS (
     SELECT DISTINCT 
         FromDate, 
@@ -15,7 +6,7 @@ WITH WeekPeriods AS (
     FROM dbo.TRN_TimeBooking
 ),
 
--- STEP: Summarize per day (per employee × week × transaction date)
+-- Daily summary (employee × week × day)
 DailyStatus AS (
     SELECT
         tb.Emp_ID,
@@ -25,18 +16,19 @@ DailyStatus AS (
         SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
         SUM(
             CASE 
-                -- treat a booked-hour as "approved" when its parent timesheet is approved.
                 WHEN ISNULL(tb.PMApproval, 0) = 1 THEN ISNULL(bd.BookedHours, 0)
                 ELSE 0
             END
         ) AS ApprovedHours
     FROM dbo.TRN_TimeBooking tb
-    INNER JOIN dbo.TRN_BookedDate bd ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    INNER JOIN dbo.TRN_BookedDate bd 
+        ON tb.TimeBooking_Id = bd.TimeBooking_Id
+       AND bd.BookedHours > 0   -- ✅ Only booked hours
     WHERE tb.FromDate >= '2025-01-01' AND tb.ToDate <= '2025-08-15'
     GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate, bd.Date
 ),
 
--- STEP: Summarize week-level approved hours (derived from daily sums)
+-- Weekly summary for partial approval logic
 WeeklyStatus AS (
     SELECT
         Emp_ID,
@@ -48,7 +40,6 @@ WeeklyStatus AS (
     GROUP BY Emp_ID, FromDate, ToDate
 )
 
--- MAIN
 SELECT
     mu.EmpNo AS Emp_ID,
     tb.TimeBooking_Id AS [Timesheet No],
@@ -71,21 +62,21 @@ SELECT
     tb.BookedOn,
     lr.Rate AS [Labour Rate],
 
-    -- DAY-WISE STATUS following your rules:
+    -- ✅ Day-wise Status logic with workflow statuses
     CASE
-        -- no timesheet for that employee-week
+        -- No timesheet created at all
         WHEN tb.TimeBooking_Id IS NULL THEN 'Not Booked'
 
-        -- a booked date row exists but total hours on that date = 0 (or null) -> Not Booked
+        -- Explicit workflow statuses
+        WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 THEN 'Pending with HH'
+        WHEN tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) THEN 'Pending with PM'
+        WHEN tb.IsRejected = 1 AND (tb.PMRemark IS NOT NULL AND tb.PMRemark <> '') THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 AND (tb.DHRemark IS NOT NULL AND tb.DHRemark <> '') THEN 'HH rejected'
+
+        -- Day-wise logic
         WHEN ds.TotalHours IS NULL OR ds.TotalHours = 0 THEN 'Not Booked'
-
-        -- if this day has any approved hours -> Approved (you requested days with any approved hour be treated Approved)
         WHEN ds.ApprovedHours > 0 THEN 'Approved'
-
-        -- entire week has zero approved hours -> mark day(s) as Not Booked
         WHEN COALESCE(ws.WeekApprovedHours, 0) = 0 THEN 'Not Booked'
-
-        -- this day has 0 approved hours but somewhere in the week there are approved hours -> Partial Approved
         WHEN ds.ApprovedHours = 0 AND COALESCE(ws.WeekApprovedHours, 0) > 0 THEN 'Partial Approved'
 
         ELSE 'Unknown'
@@ -94,20 +85,20 @@ SELECT
     -- Report Time
     CAST(GETDATE() AS DATE) AS [Report Date],
     FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
-
     wp.Month AS [Month (for which the timecard is submitted)]
 
 FROM dbo.MST_User mu
 CROSS JOIN WeekPeriods wp
 
--- timesheet(s) for the employee-week (may be multiple projects -> multiple TimeBooking_Id)
 LEFT JOIN dbo.TRN_TimeBooking tb 
     ON mu.EmpNo = tb.Emp_ID 
     AND tb.FromDate = wp.FromDate 
     AND tb.ToDate = wp.ToDate
 
+-- ✅ Only bring daily booked rows when BookedHours > 0
 LEFT JOIN dbo.TRN_BookedDate bd 
     ON tb.TimeBooking_Id = bd.TimeBooking_Id
+   AND bd.BookedHours > 0
 
 LEFT JOIN dbo.Budget pb 
     ON tb.ProjectNo = pb.Projectcode 
@@ -126,7 +117,6 @@ LEFT JOIN dbo.MST_LabourRate lr
     AND tb.BookedOn >= lr.FromDate 
     AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
 
--- join the daily and weekly summaries
 LEFT JOIN DailyStatus ds 
     ON ds.Emp_ID = tb.Emp_ID
     AND ds.FromDate = tb.FromDate
@@ -140,4 +130,3 @@ LEFT JOIN WeeklyStatus ws
 
 WHERE mu.InactiveDate IS NULL
 ORDER BY mu.EmployeeName, wp.FromDate, bd.Date;
-
