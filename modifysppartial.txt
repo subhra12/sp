@@ -20,8 +20,6 @@ WeeklyStatus AS (
     FROM dbo.TRN_TimeBooking tb
     JOIN dbo.TRN_BookedDate bd 
         ON tb.TimeBooking_Id = bd.TimeBooking_Id
-    WHERE tb.FromDate >= '2025-01-01' 
-      AND tb.ToDate   <= '2025-08-15'
     GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
 )
 SELECT
@@ -46,21 +44,34 @@ SELECT
     tb.BookedOn,
     lr.Rate AS [Labour Rate],
 
-    -- Status logic
+    -- Day-wise status
     CASE 
         WHEN tb.TimeBooking_Id IS NULL 
              THEN 'Not Booked'
 
-        -- Day-wise Approved
-        WHEN tb.DHApproval = 1 AND tb.PMApproval = 1 
+        -- Case A: Whole week all approved
+        WHEN ws.TotalHours > 0 
+             AND ws.ApprovedHours = ws.TotalHours
              AND bd.BookedHours > 0
              THEN 'Approved'
 
-        -- Pending flows
-        WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 
+        -- Case B: Mix of approvals and pendings
+        WHEN ws.TotalHours > 0 
+             AND ws.ApprovedHours < ws.TotalHours
+             AND tb.DHApproval = 1 AND tb.PMApproval = 1 
+             AND bd.BookedHours > 0
+             THEN 'Partially Approved'   -- ✅ correction here
+
+        WHEN ws.TotalHours > 0 
+             AND ws.ApprovedHours < ws.TotalHours
+             AND tb.DHApproval = 0 AND tb.IsSubmitted = 1
+             AND bd.BookedHours > 0
              THEN 'Pending with HH'
-        WHEN tb.DHApproval = 1 
-             AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) 
+
+        WHEN ws.TotalHours > 0 
+             AND ws.ApprovedHours < ws.TotalHours
+             AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0)
+             AND bd.BookedHours > 0
              THEN 'Pending with PM'
 
         -- Rejected flows
@@ -68,12 +79,6 @@ SELECT
              THEN 'PM rejected'
         WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' 
              THEN 'HH rejected'
-
-        -- Partial Approved (some days approved, some not)
-        WHEN ws.ApprovedHours > 0 
-             AND ws.ApprovedHours < ws.TotalHours 
-             AND bd.BookedHours > 0
-             THEN 'Partial Approved'
 
         WHEN tb.IsSubmitted = 0 
              THEN 'Draft'
@@ -89,7 +94,6 @@ SELECT
 FROM dbo.MST_User mu
 CROSS JOIN WeekPeriods wp
 
--- Left join actual time bookings
 LEFT JOIN dbo.TRN_TimeBooking tb 
     ON mu.EmpNo = tb.Emp_ID 
     AND tb.FromDate = wp.FromDate 
@@ -97,7 +101,7 @@ LEFT JOIN dbo.TRN_TimeBooking tb
 
 LEFT JOIN dbo.TRN_BookedDate bd 
     ON tb.TimeBooking_Id = bd.TimeBooking_Id
-   AND bd.BookedHours > 0   -- only real booked days
+   AND bd.BookedHours > 0
 
 LEFT JOIN dbo.Budget pb 
     ON tb.ProjectNo = pb.Projectcode 
@@ -121,5 +125,5 @@ LEFT JOIN WeeklyStatus ws
    AND ws.ToDate   = tb.ToDate
 
 WHERE mu.InactiveDate IS NULL
-  AND (bd.Date IS NOT NULL OR tb.TimeBooking_Id IS NULL)  -- removes NULL extra row
+  AND (bd.Date IS NOT NULL OR tb.TimeBooking_Id IS NULL)
 ORDER BY mu.EmployeeName, wp.FromDate, bd.Date;
