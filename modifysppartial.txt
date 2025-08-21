@@ -1,3 +1,12 @@
+
+========================================
+WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 THEN 'Pending with HH'
+        WHEN tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) THEN 'Pending with PM'
+         WHEN tb.IsRejected = 1 AND (tb.PMRemark<>'' or tb.PMRemark <>null ) THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 AND (tb.DHRemark<>'' or tb.DHRemark <>null )THEN 'HH rejected'
+=====================================
+
+
 WITH WeekPeriods AS (
     SELECT DISTINCT 
         FromDate, 
@@ -131,3 +140,4 @@ LEFT JOIN WeeklyStatus ws
 
 WHERE mu.InactiveDate IS NULL
 ORDER BY mu.EmployeeName, wp.FromDate, bd.Date;
+
