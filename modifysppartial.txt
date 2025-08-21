@@ -1,3 +1,18 @@
+===========================================
+
+AND (
+        tb.TimeBooking_Id IS NOT NULL   -- keep actual booked rows
+        OR NOT EXISTS (                 -- keep only true "Not Booked" weeks
+              SELECT 1 
+              FROM dbo.TRN_TimeBooking t2
+              WHERE t2.Emp_ID = mu.EmpNo
+                AND t2.FromDate = wp.FromDate
+                AND t2.ToDate = wp.ToDate
+          )
+      )
+
+==================================================
+
 ;WITH WeekPeriods AS (
     SELECT DISTINCT 
         FromDate, 
@@ -127,3 +142,4 @@ LEFT JOIN WeeklyStatus ws
 WHERE mu.InactiveDate IS NULL
   AND (bd.Date IS NOT NULL OR tb.TimeBooking_Id IS NULL)
 ORDER BY mu.EmployeeName, wp.FromDate, bd.Date;
+
