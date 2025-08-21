@@ -1,45 +1,29 @@
-WITH WeekPeriods AS (
+;WITH WeekPeriods AS (
     SELECT DISTINCT 
         FromDate, 
         ToDate, 
         FORMAT(FromDate, 'MMMM yyyy') AS [Month]
     FROM dbo.TRN_TimeBooking
 ),
-
--- Daily summary (employee × week × day)
-DailyStatus AS (
+WeeklyStatus AS (
     SELECT
         tb.Emp_ID,
         tb.FromDate,
         tb.ToDate,
-        bd.Date AS BookDate,
         SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
-        SUM(
-            CASE 
-                WHEN ISNULL(tb.PMApproval, 0) = 1 THEN ISNULL(bd.BookedHours, 0)
-                ELSE 0
-            END
-        ) AS ApprovedHours
+        SUM(CASE 
+                WHEN ISNULL(tb.PMApproval, 0) = 1 
+                     AND ISNULL(tb.DHApproval, 0) = 1 
+                THEN ISNULL(bd.BookedHours, 0) 
+                ELSE 0 
+            END) AS ApprovedHours
     FROM dbo.TRN_TimeBooking tb
-    INNER JOIN dbo.TRN_BookedDate bd 
+    JOIN dbo.TRN_BookedDate bd 
         ON tb.TimeBooking_Id = bd.TimeBooking_Id
-       AND bd.BookedHours > 0   -- ✅ Only booked hours
-    WHERE tb.FromDate >= '2025-01-01' AND tb.ToDate <= '2025-08-15'
-    GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate, bd.Date
-),
-
--- Weekly summary for partial approval logic
-WeeklyStatus AS (
-    SELECT
-        Emp_ID,
-        FromDate,
-        ToDate,
-        SUM(TotalHours)   AS WeekTotalHours,
-        SUM(ApprovedHours) AS WeekApprovedHours
-    FROM DailyStatus
-    GROUP BY Emp_ID, FromDate, ToDate
+    WHERE tb.FromDate >= '2025-01-01' 
+      AND tb.ToDate   <= '2025-08-15'
+    GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
 )
-
 SELECT
     mu.EmpNo AS Emp_ID,
     tb.TimeBooking_Id AS [Timesheet No],
@@ -62,71 +46,80 @@ SELECT
     tb.BookedOn,
     lr.Rate AS [Labour Rate],
 
-    -- ✅ Day-wise Status logic with workflow statuses
-    CASE
-        -- No timesheet created at all
-        WHEN tb.TimeBooking_Id IS NULL THEN 'Not Booked'
+    -- Status logic
+    CASE 
+        WHEN tb.TimeBooking_Id IS NULL 
+             THEN 'Not Booked'
 
-        -- Explicit workflow statuses
-        WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 THEN 'Pending with HH'
-        WHEN tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) THEN 'Pending with PM'
-        WHEN tb.IsRejected = 1 AND (tb.PMRemark IS NOT NULL AND tb.PMRemark <> '') THEN 'PM rejected'
-        WHEN tb.IsRejected = 1 AND (tb.DHRemark IS NOT NULL AND tb.DHRemark <> '') THEN 'HH rejected'
+        -- Day-wise Approved
+        WHEN tb.DHApproval = 1 AND tb.PMApproval = 1 
+             AND bd.BookedHours > 0
+             THEN 'Approved'
 
-        -- Day-wise logic
-        WHEN ds.TotalHours IS NULL OR ds.TotalHours = 0 THEN 'Not Booked'
-        WHEN ds.ApprovedHours > 0 THEN 'Approved'
-        WHEN COALESCE(ws.WeekApprovedHours, 0) = 0 THEN 'Not Booked'
-        WHEN ds.ApprovedHours = 0 AND COALESCE(ws.WeekApprovedHours, 0) > 0 THEN 'Partial Approved'
+        -- Pending flows
+        WHEN tb.DHApproval = 0 AND tb.IsSubmitted = 1 
+             THEN 'Pending with HH'
+        WHEN tb.DHApproval = 1 
+             AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) 
+             THEN 'Pending with PM'
 
+        -- Rejected flows
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' 
+             THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' 
+             THEN 'HH rejected'
+
+        -- Partial Approved (some days approved, some not)
+        WHEN ws.ApprovedHours > 0 
+             AND ws.ApprovedHours < ws.TotalHours 
+             AND bd.BookedHours > 0
+             THEN 'Partial Approved'
+
+        WHEN tb.IsSubmitted = 0 
+             THEN 'Draft'
         ELSE 'Unknown'
     END AS Status,
 
     -- Report Time
     CAST(GETDATE() AS DATE) AS [Report Date],
     FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
+
     wp.Month AS [Month (for which the timecard is submitted)]
 
 FROM dbo.MST_User mu
 CROSS JOIN WeekPeriods wp
 
+-- Left join actual time bookings
 LEFT JOIN dbo.TRN_TimeBooking tb 
     ON mu.EmpNo = tb.Emp_ID 
     AND tb.FromDate = wp.FromDate 
-    AND tb.ToDate = wp.ToDate
+    AND tb.ToDate   = wp.ToDate
 
--- ✅ Only bring daily booked rows when BookedHours > 0
 LEFT JOIN dbo.TRN_BookedDate bd 
     ON tb.TimeBooking_Id = bd.TimeBooking_Id
-   AND bd.BookedHours > 0
+   AND bd.BookedHours > 0   -- only real booked days
 
 LEFT JOIN dbo.Budget pb 
     ON tb.ProjectNo = pb.Projectcode 
-    AND tb.WBSNo = pb.WBSNumber
+   AND tb.WBSNo    = pb.WBSNumber
 
 LEFT JOIN dbo.MST_User dhUser 
     ON tb.ApprovedByDH = dhUser.EmpNo
-
 LEFT JOIN dbo.MST_User pmUser 
     ON tb.ApprovedByPM = pmUser.EmpNo
 
 LEFT JOIN dbo.MST_LabourRate lr 
-    ON lr.Department = mu.EmpDept 
-    AND lr.EmployeeType = mu.UserType
-    AND lr.Grade = mu.EmpGrade
-    AND tb.BookedOn >= lr.FromDate 
-    AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
-
-LEFT JOIN DailyStatus ds 
-    ON ds.Emp_ID = tb.Emp_ID
-    AND ds.FromDate = tb.FromDate
-    AND ds.ToDate = tb.ToDate
-    AND ds.BookDate = bd.Date
+    ON lr.Department   = mu.EmpDept 
+   AND lr.EmployeeType = mu.UserType
+   AND lr.Grade        = mu.EmpGrade
+   AND tb.BookedOn    >= lr.FromDate 
+   AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
 
 LEFT JOIN WeeklyStatus ws 
-    ON ws.Emp_ID = tb.Emp_ID
-    AND ws.FromDate = tb.FromDate
-    AND ws.ToDate = tb.ToDate
+    ON ws.Emp_ID   = tb.Emp_ID
+   AND ws.FromDate = tb.FromDate
+   AND ws.ToDate   = tb.ToDate
 
 WHERE mu.InactiveDate IS NULL
+  AND (bd.Date IS NOT NULL OR tb.TimeBooking_Id IS NULL)  -- removes NULL extra row
 ORDER BY mu.EmployeeName, wp.FromDate, bd.Date;
