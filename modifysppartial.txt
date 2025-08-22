@@ -1,24 +1,14 @@
 ;WITH WeekPeriods AS (
-    SELECT DISTINCT 
-        FromDate, 
-        ToDate, 
-        FORMAT(FromDate, 'MMMM yyyy') AS [Month]
+    SELECT DISTINCT FromDate, ToDate, FORMAT(FromDate, 'MMMM yyyy') AS [Month]
     FROM dbo.TRN_TimeBooking
 ),
 WeekDays AS (
-    -- Generate all weekdays (Mon–Fri) between FromDate and ToDate
-    SELECT 
-        wp.FromDate,
-        wp.ToDate,
-        d.Date
+    SELECT wp.FromDate, wp.ToDate, wp.Month, 
+           DATEADD(DAY, v.number, wp.FromDate) AS WorkDate
     FROM WeekPeriods wp
-    CROSS APPLY (
-        SELECT DATEADD(DAY, v.number, wp.FromDate) AS Date
-        FROM master.dbo.spt_values v
-        WHERE v.type = 'P'
-          AND DATEADD(DAY, v.number, wp.FromDate) <= wp.ToDate
-          AND DATENAME(WEEKDAY, DATEADD(DAY, v.number, wp.FromDate)) NOT IN ('Saturday','Sunday')
-    ) d
+    JOIN master.dbo.spt_values v 
+         ON v.type = 'P' AND v.number BETWEEN 0 AND DATEDIFF(DAY, wp.FromDate, wp.ToDate)
+    WHERE DATENAME(WEEKDAY, DATEADD(DAY, v.number, wp.FromDate)) NOT IN ('Saturday','Sunday')
 ),
 WeeklyStatus AS (
     SELECT
@@ -40,16 +30,14 @@ WeeklyStatus AS (
 SELECT
     mu.EmpNo AS Emp_ID,
     tb.TimeBooking_Id AS [Timesheet No],
-
     dhUser.EmployeeName AS [Approver HH Name],
     pmUser.EmployeeName AS [Approver PM Name],
-
     mu.EmployeeName AS [Employee Name],
     mu.UserType AS [Employee Type],
     mu.EmpDept AS [Department],
-    wp.FromDate,
-    wp.ToDate,
-    wd.Date AS [Transaction Date],   -- ✅ use weekdays list instead of bd.Date
+    wd.FromDate,
+    wd.ToDate,
+    wd.WorkDate AS [Transaction Date],
     bd.BookedHours,
     tb.ProjectNo,
     pb.ProjectDescription AS [Project Description],
@@ -59,18 +47,15 @@ SELECT
     tb.BookedOn,
     lr.Rate AS [Labour Rate],
 
-    -- Day-wise status
     CASE 
         WHEN tb.TimeBooking_Id IS NULL 
              THEN 'Not Booked'
 
-        -- Case A: Whole week all approved
         WHEN ws.TotalHours > 0 
              AND ws.ApprovedHours = ws.TotalHours
              AND bd.BookedHours > 0
              THEN 'Approved'
 
-        -- Case B: Mix approvals and pendings
         WHEN ws.TotalHours > 0 
              AND ws.ApprovedHours < ws.TotalHours
              AND tb.DHApproval = 1 AND tb.PMApproval = 1 
@@ -89,7 +74,6 @@ SELECT
              AND bd.BookedHours > 0
              THEN 'Pending with PM'
 
-        -- Rejected flows
         WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' 
              THEN 'PM rejected'
         WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' 
@@ -100,55 +84,35 @@ SELECT
         ELSE 'Unknown'
     END AS Status,
 
-    -- Report Time
     CAST(GETDATE() AS DATE) AS [Report Date],
     FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
-
-    wp.Month AS [Month (for which the timecard is submitted)]
+    wd.Month AS [Month (for which the timecard is submitted)]
 
 FROM dbo.MST_User mu
-CROSS JOIN WeekPeriods wp
-JOIN WeekDays wd ON wd.FromDate = wp.FromDate AND wd.ToDate = wp.ToDate   -- ✅ weekdays instead of booked dates
-
+CROSS JOIN WeekDays wd
 LEFT JOIN dbo.TRN_TimeBooking tb 
     ON mu.EmpNo = tb.Emp_ID 
-    AND tb.FromDate = wp.FromDate 
-    AND tb.ToDate   = wp.ToDate
-
+   AND tb.FromDate = wd.FromDate 
+   AND tb.ToDate   = wd.ToDate
 LEFT JOIN dbo.TRN_BookedDate bd 
     ON tb.TimeBooking_Id = bd.TimeBooking_Id
-   AND bd.Date = wd.Date   -- ✅ join to generated weekday
-
+   AND bd.Date = wd.WorkDate   -- ✅ align with weekday
 LEFT JOIN dbo.Budget pb 
     ON tb.ProjectNo = pb.Projectcode 
    AND tb.WBSNo    = pb.WBSNumber
-
 LEFT JOIN dbo.MST_User dhUser 
     ON tb.ApprovedByDH = dhUser.EmpNo
 LEFT JOIN dbo.MST_User pmUser 
     ON tb.ApprovedByPM = pmUser.EmpNo
-
 LEFT JOIN dbo.MST_LabourRate lr 
     ON lr.Department   = mu.EmpDept 
    AND lr.EmployeeType = mu.UserType
    AND lr.Grade        = mu.EmpGrade
    AND tb.BookedOn    >= lr.FromDate 
    AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
-
 LEFT JOIN WeeklyStatus ws 
     ON ws.Emp_ID   = tb.Emp_ID
    AND ws.FromDate = tb.FromDate
    AND ws.ToDate   = tb.ToDate
-
 WHERE mu.InactiveDate IS NULL
-AND (
-        tb.TimeBooking_Id IS NOT NULL   -- booked rows
-        OR NOT EXISTS (                 -- or "Not Booked" weeks
-              SELECT 1 
-              FROM dbo.TRN_TimeBooking t2
-              WHERE t2.Emp_ID = mu.EmpNo
-                AND t2.FromDate = wp.FromDate
-                AND t2.ToDate = wp.ToDate
-          )
-      )
-ORDER BY mu.EmployeeName, wp.FromDate, wd.Date;
+ORDER BY mu.EmployeeName, wd.FromDate, wd.WorkDate;
