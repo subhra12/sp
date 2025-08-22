@@ -1,15 +1,106 @@
-JOIN WeekPeriods wp
-   ON EXISTS (
-        SELECT 1 
-        FROM dbo.TRN_TimeBooking t
-        WHERE t.Emp_ID = mu.EmpNo
-          AND t.FromDate = wp.FromDate
-          AND t.ToDate   = wp.ToDate
-    )
-   OR NOT EXISTS (
-        SELECT 1 
-        FROM dbo.TRN_TimeBooking t
-        WHERE t.Emp_ID = mu.EmpNo
-          AND t.FromDate = wp.FromDate
-          AND t.ToDate   = wp.ToDate
-    )
+;WITH WeekPeriods AS (
+    SELECT DISTINCT FromDate, ToDate, FORMAT(FromDate, 'MMMM yyyy') AS [Month]
+    FROM dbo.TRN_TimeBooking
+),
+EmployeeWeeks AS (
+    SELECT mu.EmpNo, wp.FromDate, wp.ToDate, wp.Month
+    FROM dbo.MST_User mu
+    CROSS JOIN WeekPeriods wp
+    WHERE mu.InactiveDate IS NULL
+      AND (
+            EXISTS (
+                SELECT 1
+                FROM dbo.TRN_TimeBooking t
+                WHERE t.Emp_ID   = mu.EmpNo
+                  AND t.FromDate = wp.FromDate
+                  AND t.ToDate   = wp.ToDate
+            )
+            OR NOT EXISTS (   -- explicitly keep "Not Booked"
+                SELECT 1
+                FROM dbo.TRN_TimeBooking t
+                WHERE t.Emp_ID   = mu.EmpNo
+                  AND t.FromDate = wp.FromDate
+                  AND t.ToDate   = wp.ToDate
+            )
+          )
+)
+SELECT
+    mu.EmpNo AS Emp_ID,
+    ISNULL(tb.TimeBooking_Id,'') AS [Timesheet No],
+    ISNULL(dhUser.EmployeeName,'') AS [Approver HH Name],
+    ISNULL(pmUser.EmployeeName,'') AS [Approver PM Name],
+    ISNULL(mu.EmployeeName,'') AS [Employee Name],
+    ISNULL(mu.UserType,'') AS [Employee Type],
+    ISNULL(mu.EmpDept,'') AS [Department],
+    ew.FromDate,
+    ew.ToDate,
+    ISNULL(CONVERT(VARCHAR(10), bd.Date, 120), '') AS [Transaction Date],
+    ISNULL(bd.BookedHours,0) AS BookedHours,
+    ISNULL(tb.ProjectNo,'') AS ProjectNo,
+    ISNULL(pb.ProjectDescription,'') AS [Project Description],
+    ISNULL(tb.WBSNo,'') AS WBSNo,
+    ISNULL(pb.WBSDescription,'') AS WBSDescription,
+    ISNULL(tb.PO,'') AS PO,
+    ISNULL(CONVERT(VARCHAR(10),tb.BookedOn,120),'') AS BookedOn,
+    ISNULL(lr.Rate,0) AS [Labour Rate],
+
+    -- Day-wise status
+    CASE 
+        WHEN tb.TimeBooking_Id IS NULL 
+             THEN 'Not Booked'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours = ws.TotalHours AND bd.BookedHours > 0
+             THEN 'Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 1 AND tb.PMApproval = 1 AND bd.BookedHours > 0
+             THEN 'Partially Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 0 AND tb.IsSubmitted = 1 AND bd.BookedHours > 0
+             THEN 'Pending with HH'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0)
+             AND bd.BookedHours > 0
+             THEN 'Pending with PM'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' 
+             THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' 
+             THEN 'HH rejected'
+        WHEN tb.IsSubmitted = 0 THEN 'Draft'
+        ELSE 'Not Booked'
+    END AS Status,
+
+    CAST(GETDATE() AS DATE) AS [Report Date],
+    FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
+    ew.Month AS [Month (for which the timecard is submitted)]
+
+FROM EmployeeWeeks ew
+JOIN dbo.MST_User mu ON mu.EmpNo = ew.EmpNo
+
+LEFT JOIN dbo.TRN_TimeBooking tb 
+    ON mu.EmpNo = tb.Emp_ID 
+   AND tb.FromDate = ew.FromDate 
+   AND tb.ToDate   = ew.ToDate
+
+LEFT JOIN dbo.TRN_BookedDate bd 
+    ON tb.TimeBooking_Id = bd.TimeBooking_Id
+   AND bd.BookedHours > 0
+
+LEFT JOIN dbo.Budget pb 
+    ON tb.ProjectNo = pb.Projectcode 
+   AND tb.WBSNo    = pb.WBSNumber
+
+LEFT JOIN dbo.MST_User dhUser ON tb.ApprovedByDH = dhUser.EmpNo
+LEFT JOIN dbo.MST_User pmUser ON tb.ApprovedByPM = pmUser.EmpNo
+
+LEFT JOIN dbo.MST_LabourRate lr 
+    ON lr.Department   = mu.EmpDept 
+   AND lr.EmployeeType = mu.UserType
+   AND lr.Grade        = mu.EmpGrade
+   AND tb.BookedOn    >= lr.FromDate 
+   AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
+
+LEFT JOIN WeeklyStatus ws 
+    ON ws.Emp_ID   = tb.Emp_ID
+   AND ws.FromDate = tb.FromDate
+   AND ws.ToDate   = tb.ToDate
+
+ORDER BY mu.EmployeeName, ew.FromDate, bd.Date;
