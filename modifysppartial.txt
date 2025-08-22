@@ -7,22 +7,21 @@ EmployeeWeeks AS (
     FROM dbo.MST_User mu
     CROSS JOIN WeekPeriods wp
     WHERE mu.InactiveDate IS NULL
-      AND (
-            EXISTS (
-                SELECT 1
-                FROM dbo.TRN_TimeBooking t
-                WHERE t.Emp_ID   = mu.EmpNo
-                  AND t.FromDate = wp.FromDate
-                  AND t.ToDate   = wp.ToDate
-            )
-            OR NOT EXISTS (   -- explicitly keep "Not Booked"
-                SELECT 1
-                FROM dbo.TRN_TimeBooking t
-                WHERE t.Emp_ID   = mu.EmpNo
-                  AND t.FromDate = wp.FromDate
-                  AND t.ToDate   = wp.ToDate
-            )
-          )
+),
+WeeklyStatus AS (
+    SELECT 
+        tb.Emp_ID,
+        tb.FromDate,
+        tb.ToDate,
+        SUM(CASE WHEN bd.BookedHours > 0 THEN 1 ELSE 0 END) AS TotalHours,
+        SUM(CASE WHEN bd.BookedHours > 0 
+                     AND tb.DHApproval = 1 
+                     AND tb.PMApproval = 1 
+                 THEN 1 ELSE 0 END) AS ApprovedHours
+    FROM dbo.TRN_TimeBooking tb
+    INNER JOIN dbo.TRN_BookedDate bd 
+        ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
 )
 SELECT
     mu.EmpNo AS Emp_ID,
@@ -44,7 +43,7 @@ SELECT
     ISNULL(CONVERT(VARCHAR(10),tb.BookedOn,120),'') AS BookedOn,
     ISNULL(lr.Rate,0) AS [Labour Rate],
 
-    -- Day-wise status
+    -- Status calculation
     CASE 
         WHEN tb.TimeBooking_Id IS NULL 
              THEN 'Not Booked'
@@ -57,7 +56,8 @@ SELECT
              AND tb.DHApproval = 0 AND tb.IsSubmitted = 1 AND bd.BookedHours > 0
              THEN 'Pending with HH'
         WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
-             AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0)
+             AND tb.DHApproval = 1 
+             AND (tb.PMApproval IS NULL OR tb.PMApproval = 0)
              AND bd.BookedHours > 0
              THEN 'Pending with PM'
         WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' 
@@ -73,10 +73,11 @@ SELECT
     ew.Month AS [Month (for which the timecard is submitted)]
 
 FROM EmployeeWeeks ew
-JOIN dbo.MST_User mu ON mu.EmpNo = ew.EmpNo
+JOIN dbo.MST_User mu 
+    ON mu.EmpNo = ew.EmpNo
 
 LEFT JOIN dbo.TRN_TimeBooking tb 
-    ON mu.EmpNo = tb.Emp_ID 
+    ON mu.EmpNo   = tb.Emp_ID 
    AND tb.FromDate = ew.FromDate 
    AND tb.ToDate   = ew.ToDate
 
@@ -88,8 +89,11 @@ LEFT JOIN dbo.Budget pb
     ON tb.ProjectNo = pb.Projectcode 
    AND tb.WBSNo    = pb.WBSNumber
 
-LEFT JOIN dbo.MST_User dhUser ON tb.ApprovedByDH = dhUser.EmpNo
-LEFT JOIN dbo.MST_User pmUser ON tb.ApprovedByPM = pmUser.EmpNo
+LEFT JOIN dbo.MST_User dhUser 
+    ON tb.ApprovedByDH = dhUser.EmpNo
+
+LEFT JOIN dbo.MST_User pmUser 
+    ON tb.ApprovedByPM = pmUser.EmpNo
 
 LEFT JOIN dbo.MST_LabourRate lr 
     ON lr.Department   = mu.EmpDept 
@@ -103,4 +107,10 @@ LEFT JOIN WeeklyStatus ws
    AND ws.FromDate = tb.FromDate
    AND ws.ToDate   = tb.ToDate
 
+-- ✅ Remove any extra phantom rows (all NULLs but repeated week end)
+WHERE NOT (
+    tb.TimeBooking_Id IS NULL
+    AND bd.Date IS NULL
+    AND bd.BookedHours IS NULL
+)
 ORDER BY mu.EmployeeName, ew.FromDate, bd.Date;
