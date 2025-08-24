@@ -1,2 +1,119 @@
+
+-- First stage: Insert all possible rows (including duplicates)
+
 IF OBJECT_ID('tempdb..#Stage') IS NOT NULL DROP TABLE #Stage;
 IF OBJECT_ID('tempdb..#TimeData') IS NOT NULL DROP TABLE #TimeData;
+;WITH WeekPeriods AS (
+    SELECT DISTINCT 
+        FromDate, 
+        ToDate, 
+        FORMAT(FromDate, 'MMMM yyyy') AS [Month]
+    FROM dbo.TRN_TimeBooking
+),
+WeekDays AS (
+    -- Generate all weekdays (Mon–Fri) between FromDate and ToDate
+    SELECT 
+        wp.FromDate,
+        wp.ToDate,
+        d.Date
+    FROM WeekPeriods wp
+    CROSS APPLY (
+        SELECT DATEADD(DAY, v.number, wp.FromDate) AS Date
+        FROM master.dbo.spt_values v
+        WHERE v.type = 'P'
+          AND DATEADD(DAY, v.number, wp.FromDate) <= wp.ToDate
+          AND DATENAME(WEEKDAY, DATEADD(DAY, v.number, wp.FromDate)) NOT IN ('Saturday','Sunday')
+    ) d
+),
+WeeklyStatus AS (
+    SELECT
+        tb.Emp_ID,
+        tb.FromDate,
+        tb.ToDate,
+        SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
+        SUM(CASE 
+                WHEN ISNULL(tb.PMApproval, 0) = 1 
+                     AND ISNULL(tb.DHApproval, 0) = 1 
+                THEN ISNULL(bd.BookedHours, 0) 
+                ELSE 0 
+            END) AS ApprovedHours
+    FROM dbo.TRN_TimeBooking tb
+    JOIN dbo.TRN_BookedDate bd 
+        ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
+)
+
+
+SELECT
+    mu.EmpNo AS Emp_ID,
+    tb.TimeBooking_Id AS [Timesheet No],
+    dhUser.EmployeeName AS [Approver HH Name],
+    pmUser.EmployeeName AS [Approver PM Name],
+    mu.EmployeeName AS [Employee Name],
+    mu.UserType AS [Employee Type],
+    mu.EmpDept AS [Department],
+    wp.FromDate,
+    wp.ToDate,
+    wd.Date AS [TransactionDate],
+    bd.BookedHours,
+    tb.ProjectNo,
+    pb.ProjectDescription AS [Project Description],
+    tb.WBSNo,
+    pb.WBSDescription,
+    tb.PO,
+    tb.BookedOn,
+    lr.Rate AS [Labour Rate],
+    CASE 
+        WHEN tb.TimeBooking_Id IS NULL THEN 'Not Booked'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours = ws.TotalHours AND bd.BookedHours > 0
+             THEN 'Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 1 AND tb.PMApproval = 1 AND bd.BookedHours > 0
+             THEN 'Partially Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 0 AND tb.IsSubmitted = 1 AND bd.BookedHours > 0
+             THEN 'Pending with HH'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) AND bd.BookedHours > 0
+             THEN 'Pending with PM'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' THEN 'HH rejected'
+        WHEN tb.IsSubmitted = 0 THEN 'Draft'
+        ELSE 'Unknown'
+    END AS Status,
+    CAST(GETDATE() AS DATE) AS [Report Date],
+    FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
+    wp.Month AS [Month (for which the timecard is submitted)]
+INTO #Stage
+FROM dbo.MST_User mu
+CROSS JOIN WeekPeriods wp
+JOIN WeekDays wd ON wd.FromDate = wp.FromDate AND wd.ToDate = wp.ToDate
+LEFT JOIN dbo.TRN_TimeBooking tb 
+    ON mu.EmpNo = tb.Emp_ID AND tb.FromDate = wp.FromDate AND tb.ToDate = wp.ToDate
+LEFT JOIN dbo.TRN_BookedDate bd 
+    ON tb.TimeBooking_Id = bd.TimeBooking_Id AND bd.Date = wd.Date
+LEFT JOIN dbo.Budget pb ON tb.ProjectNo = pb.Projectcode AND tb.WBSNo = pb.WBSNumber
+LEFT JOIN dbo.MST_User dhUser ON tb.ApprovedByDH = dhUser.EmpNo
+LEFT JOIN dbo.MST_User pmUser ON tb.ApprovedByPM = pmUser.EmpNo
+LEFT JOIN dbo.MST_LabourRate lr 
+    ON lr.Department = mu.EmpDept AND lr.EmployeeType = mu.UserType AND lr.Grade = mu.EmpGrade
+   AND tb.BookedOn >= lr.FromDate AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
+LEFT JOIN WeeklyStatus ws ON ws.Emp_ID = tb.Emp_ID AND ws.FromDate = tb.FromDate AND ws.ToDate = tb.ToDate
+WHERE mu.InactiveDate IS NULL and mu.EmpNo='950228';
+
+-- Now filter into final table
+SELECT s.*
+INTO #TimeData
+FROM #Stage s
+WHERE 
+    s.Status <> 'Unknown'
+	--or not exists(Select 1 from #Stage x where x.Emp_ID=s.Emp_ID and x.TransactionDate=s.TransactionDate)  
+    --and if exist(
+        --AND s.BookedHours > 0
+           -- );
+
+-- Final result
+--Drop table #Stage
+SELECT * FROM #TimeData
+ORDER BY [Employee Name], FromDate, TransactionDate;
+--Drop table #TimeData
