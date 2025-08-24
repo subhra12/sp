@@ -1,4 +1,121 @@
-Msg 207, Level 16, State 1, Line 189
-Invalid column name 'HasPosBookedOnDay'.
-Msg 205, Level 16, State 1, Line 171
-All queries combined using a UNION, INTERSECT or EXCEPT operator must have an equal number of expressions in their target lists.
+IF OBJECT_ID('tempdb..#Stage') IS NOT NULL DROP TABLE #Stage;
+IF OBJECT_ID('tempdb..#TimeData') IS NOT NULL DROP TABLE #TimeData;
+
+;WITH WeekPeriods AS (
+    SELECT DISTINCT 
+        FromDate, 
+        ToDate, 
+        FORMAT(FromDate, 'MMMM yyyy') AS [Month]
+    FROM dbo.TRN_TimeBooking
+),
+WeekDays AS (
+    -- Generate weekdays (Mon–Fri)
+    SELECT 
+        wp.FromDate,
+        wp.ToDate,
+        d.Date
+    FROM WeekPeriods wp
+    CROSS APPLY (
+        SELECT DATEADD(DAY, v.number, wp.FromDate) AS Date
+        FROM master.dbo.spt_values v
+        WHERE v.type = 'P'
+          AND DATEADD(DAY, v.number, wp.FromDate) <= wp.ToDate
+          AND DATENAME(WEEKDAY, DATEADD(DAY, v.number, wp.FromDate)) NOT IN ('Saturday','Sunday')
+    ) d
+),
+WeeklyStatus AS (
+    SELECT
+        tb.Emp_ID,
+        tb.FromDate,
+        tb.ToDate,
+        SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
+        SUM(CASE 
+                WHEN ISNULL(tb.PMApproval, 0) = 1 
+                     AND ISNULL(tb.DHApproval, 0) = 1 
+                THEN ISNULL(bd.BookedHours, 0) 
+                ELSE 0 
+            END) AS ApprovedHours
+    FROM dbo.TRN_TimeBooking tb
+    JOIN dbo.TRN_BookedDate bd 
+        ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
+),
+RawStage AS (
+    SELECT
+        mu.EmpNo AS Emp_ID,
+        tb.TimeBooking_Id AS [Timesheet No],
+        dhUser.EmployeeName AS [Approver HH Name],
+        pmUser.EmployeeName AS [Approver PM Name],
+        mu.EmployeeName AS [Employee Name],
+        mu.UserType AS [Employee Type],
+        mu.EmpDept AS [Department],
+        wp.FromDate,
+        wp.ToDate,
+        wd.Date AS [TransactionDate],
+        ISNULL(bd.BookedHours,0) AS BookedHours,
+        tb.ProjectNo,
+        pb.ProjectDescription AS [Project Description],
+        tb.WBSNo,
+        pb.WBSDescription,
+        tb.PO,
+        tb.BookedOn,
+        lr.Rate AS [Labour Rate],
+        CASE 
+            WHEN tb.TimeBooking_Id IS NULL THEN 'Not Booked'
+            WHEN ws.TotalHours > 0 AND ws.ApprovedHours = ws.TotalHours AND bd.BookedHours > 0
+                 THEN 'Approved'
+            WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+                 AND tb.DHApproval = 1 AND tb.PMApproval = 1 AND bd.BookedHours > 0
+                 THEN 'Partially Approved'
+            WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+                 AND tb.DHApproval = 0 AND tb.IsSubmitted = 1 AND bd.BookedHours > 0
+                 THEN 'Pending with HH'
+            WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+                 AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) AND bd.BookedHours > 0
+                 THEN 'Pending with PM'
+            WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' THEN 'PM rejected'
+            WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' THEN 'HH rejected'
+            WHEN tb.IsSubmitted = 0 THEN 'Draft'
+            ELSE 'Unknown'
+        END AS Status,
+        CAST(GETDATE() AS DATE) AS [Report Date],
+        FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
+        wp.Month AS [Month (for which the timecard is submitted)]
+    FROM dbo.MST_User mu
+    CROSS JOIN WeekPeriods wp
+    JOIN WeekDays wd ON wd.FromDate = wp.FromDate AND wd.ToDate = wp.ToDate
+    LEFT JOIN dbo.TRN_TimeBooking tb 
+        ON mu.EmpNo = tb.Emp_ID AND tb.FromDate = wp.FromDate AND tb.ToDate = wp.ToDate
+    LEFT JOIN dbo.TRN_BookedDate bd 
+        ON tb.TimeBooking_Id = bd.TimeBooking_Id AND bd.Date = wd.Date
+    LEFT JOIN dbo.Budget pb ON tb.ProjectNo = pb.Projectcode AND tb.WBSNo = pb.WBSNumber
+    LEFT JOIN dbo.MST_User dhUser ON tb.ApprovedByDH = dhUser.EmpNo
+    LEFT JOIN dbo.MST_User pmUser ON tb.ApprovedByPM = pmUser.EmpNo
+    LEFT JOIN dbo.MST_LabourRate lr 
+        ON lr.Department = mu.EmpDept AND lr.EmployeeType = mu.UserType AND lr.Grade = mu.EmpGrade
+       AND tb.BookedOn >= lr.FromDate AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
+    LEFT JOIN WeeklyStatus ws ON ws.Emp_ID = tb.Emp_ID AND ws.FromDate = tb.FromDate AND ws.ToDate = tb.ToDate
+    WHERE mu.InactiveDate IS NULL
+)
+-- Now filter duplicates
+SELECT *
+INTO #Stage
+FROM RawStage r
+WHERE NOT EXISTS (
+    SELECT 1 
+    FROM RawStage x
+    WHERE x.Emp_ID = r.Emp_ID
+      AND x.TransactionDate = r.TransactionDate
+      AND x.BookedHours > 0
+      AND r.BookedHours = 0   -- remove null/zero duplicate if booked exists
+);
+
+-- Final filtering
+SELECT *
+INTO #TimeData
+FROM #Stage
+WHERE Status <> 'Unknown';
+
+SELECT * 
+FROM #TimeData
+ORDER BY [Employee Name], FromDate, TransactionDate;
