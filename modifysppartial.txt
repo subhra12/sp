@@ -117,7 +117,7 @@ LEFT JOIN dbo.TRN_TimeBooking tb
 
 LEFT JOIN dbo.TRN_BookedDate bd 
     ON tb.TimeBooking_Id = bd.TimeBooking_Id
-   AND bd.Date = wd.Date   -- ✅ join to generated weekday
+   AND bd.Date = wd.Date   and bd.BookedHours>0-- ✅ join to generated weekday
 
 LEFT JOIN dbo.Budget pb 
     ON tb.ProjectNo = pb.Projectcode 
@@ -140,7 +140,7 @@ LEFT JOIN WeeklyStatus ws
    AND ws.FromDate = tb.FromDate
    AND ws.ToDate   = tb.ToDate
 
-WHERE mu.InactiveDate IS NULL
+WHERE mu.InactiveDate IS NULL and mu.EmpNo='950228'
 AND (
         tb.TimeBooking_Id IS NOT NULL   -- booked rows
         OR NOT EXISTS (                 -- or "Not Booked" weeks
@@ -152,3 +152,4 @@ AND (
           )
       )
 ORDER BY mu.EmployeeName, wp.FromDate, wd.Date;
+
