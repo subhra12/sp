@@ -1,11 +1,161 @@
-WHEN tb.TimeBooking_Id IS NULL 
-         AND NOT EXISTS (
-              SELECT 1
-              FROM dbo.TRN_TimeBooking tb2
-              JOIN dbo.TRN_BookedDate bd2 
-                   ON tb2.TimeBooking_Id = bd2.TimeBooking_Id
-              WHERE tb2.Emp_ID = mu.EmpNo
-                AND bd2.[Date] = wd.[Date]
-                AND bd2.BookedHours > 0
+-- Rerun-safe
+IF OBJECT_ID('tempdb..#Stage')    IS NOT NULL DROP TABLE #Stage;
+IF OBJECT_ID('tempdb..#TimeData') IS NOT NULL DROP TABLE #TimeData;
+
+;WITH WeekPeriods AS (
+    SELECT DISTINCT FromDate, ToDate, FORMAT(FromDate, 'MMMM yyyy') AS [Month]
+    FROM dbo.TRN_TimeBooking
+),
+WeekDays AS (
+    -- Generate Mon–Fri dates for each week period
+    SELECT wp.FromDate, wp.ToDate,
+           DATEADD(DAY, v.number, wp.FromDate) AS [Date]
+    FROM WeekPeriods wp
+    JOIN master.dbo.spt_values v
+         ON v.type = 'P'
+        AND v.number BETWEEN 0 AND DATEDIFF(DAY, wp.FromDate, wp.ToDate)
+    WHERE DATENAME(WEEKDAY, DATEADD(DAY, v.number, wp.FromDate)) NOT IN ('Saturday','Sunday')
+),
+WeeklyStatus AS (
+    SELECT
+        tb.Emp_ID, tb.FromDate, tb.ToDate,
+        SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
+        SUM(CASE WHEN ISNULL(tb.PMApproval,0) = 1 AND ISNULL(tb.DHApproval,0) = 1
+                 THEN ISNULL(bd.BookedHours,0) ELSE 0 END) AS ApprovedHours
+    FROM dbo.TRN_TimeBooking tb
+    JOIN dbo.TRN_BookedDate bd ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
+)
+-- =========================================================
+-- Stage EVERYTHING (can include duplicates & NULL hours)
+-- =========================================================
+SELECT
+    mu.EmpNo AS Emp_ID,
+    tb.TimeBooking_Id AS [Timesheet No],
+    dhUser.EmployeeName AS [Approver HH Name],
+    pmUser.EmployeeName AS [Approver PM Name],
+    mu.EmployeeName AS [Employee Name],
+    mu.UserType AS [Employee Type],
+    mu.EmpDept AS [Department],
+    wp.FromDate,
+    wp.ToDate,
+    wd.[Date] AS [TransactionDate],
+    bd.BookedHours,
+    tb.ProjectNo,
+    pb.ProjectDescription AS [Project Description],
+    tb.WBSNo,
+    pb.WBSDescription,
+    tb.PO,
+    tb.BookedOn,
+    lr.Rate AS [Labour Rate],
+    CASE 
+        WHEN tb.TimeBooking_Id IS NULL THEN 'Not Booked'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours = ws.TotalHours AND ISNULL(bd.BookedHours,0) > 0 THEN 'Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours AND tb.DHApproval = 1 AND tb.PMApproval = 1 AND ISNULL(bd.BookedHours,0) > 0 THEN 'Partially Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours AND tb.DHApproval = 0 AND tb.IsSubmitted = 1 AND ISNULL(bd.BookedHours,0) > 0 THEN 'Pending with HH'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) AND ISNULL(bd.BookedHours,0) > 0 THEN 'Pending with PM'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' THEN 'HH rejected'
+        WHEN tb.IsSubmitted = 0 THEN 'Draft'
+        ELSE 'Unknown'
+    END AS Status,
+    CAST(GETDATE() AS DATE) AS [Report Date],
+    FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
+    wp.Month AS [Month (for which the timecard is submitted)]
+INTO #Stage
+FROM dbo.MST_User mu
+CROSS JOIN WeekPeriods wp
+JOIN WeekDays wd
+  ON wd.FromDate = wp.FromDate AND wd.ToDate = wp.ToDate
+LEFT JOIN dbo.TRN_TimeBooking tb
+  ON mu.EmpNo = tb.Emp_ID
+ AND tb.FromDate = wp.FromDate
+ AND tb.ToDate   = wp.ToDate
+LEFT JOIN dbo.TRN_BookedDate bd
+  ON tb.TimeBooking_Id = bd.TimeBooking_Id
+ AND bd.[Date] = wd.[Date]
+LEFT JOIN dbo.Budget pb
+  ON tb.ProjectNo = pb.Projectcode
+ AND tb.WBSNo    = pb.WBSNumber
+LEFT JOIN dbo.MST_User dhUser ON tb.ApprovedByDH = dhUser.EmpNo
+LEFT JOIN dbo.MST_User pmUser ON tb.ApprovedByPM = pmUser.EmpNo
+LEFT JOIN dbo.MST_LabourRate lr 
+  ON lr.Department   = mu.EmpDept 
+ AND lr.EmployeeType = mu.UserType
+ AND lr.Grade        = mu.EmpGrade
+ AND tb.BookedOn    >= lr.FromDate 
+ AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
+LEFT JOIN WeeklyStatus ws 
+  ON ws.Emp_ID   = tb.Emp_ID
+ AND ws.FromDate = tb.FromDate
+ AND ws.ToDate   = tb.ToDate
+WHERE mu.InactiveDate IS NULL
+-- Optional tester:
+-- AND mu.EmpNo = '950228'
+;
+
+-- =========================================================
+-- Build final set:
+--  A) keep ALL rows with BookedHours > 0
+--  B) add ONE "Not Booked" row per Emp_ID+TransactionDate
+--     ONLY if there is NO row with BookedHours > 0 for that date
+--  C) exclude Status = 'Unknown'
+-- =========================================================
+SELECT *
+INTO #TimeData
+FROM (
+    -- A) keep all positive bookings
+    SELECT s.*
+    FROM #Stage s
+    WHERE s.Status <> 'Unknown'
+      AND s.BookedHours > 0
+
+    UNION ALL
+
+    -- B) one Not Booked row per Emp_ID+TransactionDate if no positive exists
+    SELECT
+        s.Emp_ID,
+        s.[Timesheet No],
+        s.[Approver HH Name],
+        s.[Approver PM Name],
+        s.[Employee Name],
+        s.[Employee Type],
+        s.[Department],
+        s.FromDate,
+        s.ToDate,
+        s.TransactionDate,
+        s.BookedHours,              -- will be NULL/0 here
+        s.ProjectNo,
+        s.[Project Description],
+        s.WBSNo,
+        s.[WBSDescription],
+        s.PO,
+        s.BookedOn,
+        s.[Labour Rate],
+        'Not Booked' AS Status,     -- force final status
+        s.[Report Date],
+        s.[Report Time],
+        s.[Month (for which the timecard is submitted)]
+    FROM (
+        SELECT s.*,
+               ROW_NUMBER() OVER (PARTITION BY s.Emp_ID, s.TransactionDate ORDER BY s.Emp_ID) AS rn
+        FROM #Stage s
+        WHERE s.Status <> 'Unknown'
+          AND ISNULL(s.BookedHours,0) = 0
+          AND NOT EXISTS (
+                SELECT 1
+                FROM #Stage x
+                WHERE x.Emp_ID = s.Emp_ID
+                  AND x.TransactionDate = s.TransactionDate
+                  AND x.BookedHours > 0
           )
-    THEN 'Not Booked'
+    ) s
+    WHERE s.rn = 1
+) F;
+
+-- =========================================================
+-- Output
+-- =========================================================
+SELECT *
+FROM #TimeData
+ORDER BY [Employee Name], FromDate, TransactionDate, ProjectNo;
