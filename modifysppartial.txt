@@ -4,7 +4,7 @@ FROM #Stage s
 WHERE 
     s.Status <> 'Unknown'
     AND (
-        -- Include rows with BookedHours > 0 (valid bookings)
+        -- Include rows with BookedHours > 0
         s.BookedHours > 0
 
         -- OR include "Not Booked" rows only if no other status exists for same Emp_ID and TransactionDate
@@ -15,8 +15,15 @@ WHERE
                 FROM #Stage x
                 WHERE x.Emp_ID = s.Emp_ID
                   AND x.TransactionDate = s.TransactionDate
-                  AND x.Status <> 'Not Booked'
-                  AND ISNULL(x.BookedHours, 0) > 0
+                  AND x.BookedHours > 0
             )
         )
+    )
+    -- Prevent duplicate "Not Booked" entries by selecting only one per Emp_ID and TransactionDate
+    AND NOT EXISTS (
+        SELECT 1
+        FROM #TimeData td
+        WHERE td.Emp_ID = s.Emp_ID
+          AND td.TransactionDate = s.TransactionDate
+          AND td.Status = 'Not Booked'
     );
