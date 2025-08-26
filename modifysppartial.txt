@@ -1,29 +1,20 @@
-SELECT s.*
+;WITH RankedStage AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY Emp_ID, TransactionDate
+               ORDER BY 
+                   CASE WHEN BookedHours > 0 THEN 1 ELSE 2 END,
+                   Status
+           ) AS rn
+    FROM #Stage
+    WHERE Status <> 'Unknown'
+)
+SELECT *
 INTO #TimeData
-FROM #Stage s
+FROM RankedStage
 WHERE 
-    s.Status <> 'Unknown'
-    AND (
-        -- Include rows with BookedHours > 0
-        s.BookedHours > 0
+    -- Include valid bookings
+    BookedHours > 0
 
-        -- OR include "Not Booked" rows only if no other status exists for same Emp_ID and TransactionDate
-        OR (
-            s.Status = 'Not Booked'
-            AND NOT EXISTS (
-                SELECT 1
-                FROM #Stage x
-                WHERE x.Emp_ID = s.Emp_ID
-                  AND x.TransactionDate = s.TransactionDate
-                  AND x.BookedHours > 0
-            )
-        )
-    )
-    -- Prevent duplicate "Not Booked" entries by selecting only one per Emp_ID and TransactionDate
-    AND NOT EXISTS (
-        SELECT 1
-        FROM #TimeData td
-        WHERE td.Emp_ID = s.Emp_ID
-          AND td.TransactionDate = s.TransactionDate
-          AND td.Status = 'Not Booked'
-    );
+    -- OR include only one "Not Booked" row if no valid booking exists
+    OR (Status = 'Not Booked' AND rn = 1 AND BookedHours IS NULL);
