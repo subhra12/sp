@@ -22,7 +22,11 @@ SELECT
     CAST(GETDATE() AS DATE) AS [Report Date],
     FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
     s.[Month (for which the timecard is submitted)]
-FROM #Stage s
+FROM (
+    SELECT DISTINCT Emp_ID, [Employee Name], [Employee Type], [Department],
+           FromDate, ToDate, TransactionDate, [Month (for which the timecard is submitted)]
+    FROM #Stage
+) s
 WHERE NOT EXISTS (
     SELECT 1
     FROM #TimeData td
