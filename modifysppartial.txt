@@ -1,28 +1,41 @@
-SELECT s.*
-INTO #TimeData
-FROM #Stage s
-WHERE 
-    s.Status <> 'Unknown'
-    AND (
-        -- Insert rows with BookedHours > 0 (i.e., valid bookings)
-        s.BookedHours > 0
+INSERT INTO #TimeData
+SELECT *
+FROM #Stage
+WHERE BookedHours > 0 AND Status <> 'Unknown';
 
-        -- OR insert 'Not Booked' only if no other status exists for that Emp_ID and TransactionDate
-        OR (
-            s.Status = 'Not Booked'
-            AND NOT EXISTS (
-                SELECT 1
-                FROM #Stage x
-                WHERE x.Emp_ID = s.Emp_ID
-                  AND x.TransactionDate = s.TransactionDate
-                  AND x.Status <> 'Not Booked'
-            )
-            AND NOT EXISTS (
-                SELECT 1
-                FROM #TimeData td
-                WHERE td.Emp_ID = s.Emp_ID
-                  AND td.TransactionDate = s.TransactionDate
-                  AND td.Status = 'Not Booked'
-            )
-        )
-    );
+INSERT INTO #TimeData
+SELECT 
+    mu.EmpNo AS Emp_ID,
+    NULL AS [Timesheet No],
+    NULL AS [Approver HH Name],
+    NULL AS [Approver PM Name],
+    mu.EmployeeName AS [Employee Name],
+    mu.UserType AS [Employee Type],
+    mu.EmpDept AS [Department],
+    wp.FromDate,
+    wp.ToDate,
+    wd.Date AS [TransactionDate],
+    NULL AS BookedHours,
+    NULL AS ProjectNo,
+    NULL AS [Project Description],
+    NULL AS WBSNo,
+    NULL AS WBSDescription,
+    NULL AS PO,
+    NULL AS BookedOn,
+    NULL AS [Labour Rate],
+    'Not Booked' AS Status,
+    CAST(GETDATE() AS DATE) AS [Report Date],
+    FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
+    FORMAT(wp.FromDate, 'MMMM yyyy') AS [Month (for which the timecard is submitted)]
+FROM dbo.MST_User mu
+CROSS JOIN WeekPeriods wp
+JOIN WeekDays wd ON wd.FromDate = wp.FromDate AND wd.ToDate = wp.ToDate
+WHERE mu.InactiveDate IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM #TimeData td
+      WHERE td.Emp_ID = mu.EmpNo
+        AND td.TransactionDate = wd.Date
+  );
+SELECT * FROM #TimeData
+ORDER BY [Employee Name], FromDate, TransactionDate;
