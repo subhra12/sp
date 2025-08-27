@@ -1,41 +1,15 @@
 INSERT INTO #TimeData
-SELECT *
-FROM #Stage
-WHERE BookedHours > 0 AND Status <> 'Unknown';
-
-;WITH WeekPeriods AS (
-    SELECT DISTINCT 
-        FromDate, 
-        ToDate, 
-        FORMAT(FromDate, 'MMMM yyyy') AS [Month]
-    FROM dbo.TRN_TimeBooking
-),
-WeekDays AS (
-    SELECT 
-        wp.FromDate,
-        wp.ToDate,
-        DATEADD(DAY, v.number, wp.FromDate) AS Date
-    FROM WeekPeriods wp
-    CROSS APPLY (
-        SELECT number
-        FROM master.dbo.spt_values
-        WHERE type = 'P'
-          AND DATEADD(DAY, number, wp.FromDate) <= wp.ToDate
-          AND DATENAME(WEEKDAY, DATEADD(DAY, number, wp.FromDate)) NOT IN ('Saturday','Sunday')
-    ) v
-)
-INSERT INTO #TimeData
 SELECT 
-    mu.EmpNo AS Emp_ID,
+    s.Emp_ID,
     NULL AS [Timesheet No],
     NULL AS [Approver HH Name],
     NULL AS [Approver PM Name],
-    mu.EmployeeName AS [Employee Name],
-    mu.UserType AS [Employee Type],
-    mu.EmpDept AS [Department],
-    wd.FromDate,
-    wd.ToDate,
-    wd.Date AS [TransactionDate],
+    s.[Employee Name],
+    s.[Employee Type],
+    s.[Department],
+    s.FromDate,
+    s.ToDate,
+    s.TransactionDate,
     NULL AS BookedHours,
     NULL AS ProjectNo,
     NULL AS [Project Description],
@@ -47,18 +21,11 @@ SELECT
     'Not Booked' AS Status,
     CAST(GETDATE() AS DATE) AS [Report Date],
     FORMAT(GETDATE(), 'hh:mm tt') AS [Report Time],
-    FORMAT(wd.FromDate, 'MMMM yyyy') AS [Month (for which the timecard is submitted)]
-FROM dbo.MST_User mu
-JOIN WeekDays wd ON 1=1
-WHERE mu.InactiveDate IS NULL
-  AND NOT EXISTS (
-      SELECT 1
-      FROM #TimeData td
-      WHERE td.Emp_ID = mu.EmpNo
-        AND td.TransactionDate = wd.Date
-  );
-
-
-SELECT * FROM #TimeData
-ORDER BY [Employee Name], FromDate, TransactionDate;
-
+    s.[Month (for which the timecard is submitted)]
+FROM #Stage s
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM #TimeData td
+    WHERE td.Emp_ID = s.Emp_ID
+      AND td.TransactionDate = s.TransactionDate
+);
