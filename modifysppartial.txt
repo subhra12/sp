@@ -3,32 +3,26 @@ INTO #TimeData
 FROM #Stage s
 WHERE 
     s.Status <> 'Unknown'
-    AND NOT EXISTS (
-        SELECT 1
-        FROM #Stage x
-        WHERE x.Emp_ID = s.Emp_ID
-          AND x.TransactionDate = s.TransactionDate
-          AND x.Status IN ('Approved', 'Partially Approved', 'Pending with HH', 'Pending with PM', 'PM rejected', 'HH rejected', 'Draft')
-    )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM #TimeData td
-        WHERE td.Emp_ID = s.Emp_ID
-          AND td.TransactionDate = s.TransactionDate
-          AND td.Status = 'Not Booked'
-    )
     AND (
-        s.Status <> 'Not Booked' OR
-        (
+        -- Insert rows with BookedHours > 0 (i.e., valid bookings)
+        s.BookedHours > 0
+
+        -- OR insert 'Not Booked' only if no other status exists for that Emp_ID and TransactionDate
+        OR (
             s.Status = 'Not Booked'
             AND NOT EXISTS (
                 SELECT 1
                 FROM #Stage x
                 WHERE x.Emp_ID = s.Emp_ID
                   AND x.TransactionDate = s.TransactionDate
-                  AND x.Status = 'Not Booked'
-                  AND x.BookedHours IS NULL
-                  AND x.EmployeeName <> s.EmployeeName -- optional: to avoid same row
+                  AND x.Status <> 'Not Booked'
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM #TimeData td
+                WHERE td.Emp_ID = s.Emp_ID
+                  AND td.TransactionDate = s.TransactionDate
+                  AND td.Status = 'Not Booked'
             )
         )
     );
