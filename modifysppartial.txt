@@ -1,3 +1,5 @@
+https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap
+
 INSERT INTO #TimeData
 SELECT 
     s.Emp_ID,
@@ -33,3 +35,4 @@ WHERE NOT EXISTS (
     WHERE td.Emp_ID = s.Emp_ID
       AND td.TransactionDate = s.TransactionDate
 );
+
