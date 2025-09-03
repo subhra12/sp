@@ -1,4 +1,5 @@
 https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap
+https://taslsftp.tataadvancedsystems.com/#/signin
 
 INSERT INTO #TimeData
 SELECT 
@@ -35,4 +36,5 @@ WHERE NOT EXISTS (
     WHERE td.Emp_ID = s.Emp_ID
       AND td.TransactionDate = s.TransactionDate
 );
+
 
