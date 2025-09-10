@@ -1,19 +1,13 @@
-   const { startDate, endDate } = this.fydate.getCurrentFinancialYearDates();
+getCurrentMonthDates(): { startDate: string, endDate: string } {
+    const today = new Date();
+    const currentYear = today.getFullYear();
+    const currentMonth = today.getMonth(); // 0-based index
 
-  getCurrentFinancialYearDates(): { startDate: string, endDate: string } {
-        const today = new Date();
-        const currentYear = today.getFullYear();
-        
-        // Financial year starts from April 1st of the previous year
-        const financialYearStart = new Date(currentYear - (today.getMonth() < 3 ? 1 : 0), 3, 1);
-    
-        // Financial year ends on March 31st of the current year
-        const financialYearEnd = new Date(currentYear + (today.getMonth() > 2 ? 1 : 0), 2, 31);
-    
-        return {
-            startDate: this.formatDate(financialYearStart),
-            endDate: this.formatDate(financialYearEnd)
-        };
-    }
+    const startDate = new Date(currentYear, currentMonth, 1);
+    const endDate = new Date(currentYear, currentMonth + 1, 0); // Last day of current month
 
-
+    return {
+        startDate: this.formatDate(startDate),
+        endDate: this.formatDate(endDate)
+    };
+}
