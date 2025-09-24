@@ -1,13 +1,181 @@
-getCurrentMonthDates(): { startDate: string, endDate: string } {
-    const today = new Date();
-    const currentYear = today.getFullYear();
-    const currentMonth = today.getMonth(); // 0-based index
+USE [TimeBooking_Dev]
+GO
 
-    const startDate = new Date(currentYear, currentMonth, 1);
-    const endDate = new Date(currentYear, currentMonth + 1, 0); // Last day of current month
+/****** Object:  StoredProcedure [dbo].[EMPLOYEESTATUSDRAFT01092025]    Script Date: 24-09-2025 21:14:10 ******/
+SET ANSI_NULLS ON
+GO
 
-    return {
-        startDate: this.formatDate(startDate),
-        endDate: this.formatDate(endDate)
-    };
-}
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+--exec EMPLOYEESTATUSDRAFT01092025 '2025-09-01 09:30:00.000','2025-09-03 09:30:00.000'
+--exec EMPLOYEESTATUSDRAFT10092025 '09-01-2025 09:30:00.000','09-04-2025 09:30:00.000'
+
+ALTER procedure [dbo].[EMPLOYEESTATUSDRAFT01092025]
+
+@FromDate Datetime,                          
+@ToDate Datetime
+
+As
+begin
+SET NOCOUNT ON;
+
+if (@todate>GETDATE())
+	begin
+		set @todate=GETDATE()
+	end
+
+IF OBJECT_ID('tempdb..#Stage') IS NOT NULL DROP TABLE #Stage;
+IF OBJECT_ID('tempdb..#TimeData') IS NOT NULL DROP TABLE #TimeData;
+;WITH WeekPeriods AS (
+    SELECT DISTINCT 
+        FromDate, 
+        ToDate, 
+        FORMAT(FromDate, 'MMMM yyyy') AS [Month]
+    FROM dbo.TRN_TimeBooking
+),
+WeekDays AS (
+    -- Generate all weekdays (Mon–Fri) between FromDate and ToDate
+    SELECT 
+        wp.FromDate,
+        wp.ToDate,
+        d.Date
+    FROM WeekPeriods wp
+    CROSS APPLY (
+        SELECT DATEADD(DAY, v.number, wp.FromDate) AS Date
+        FROM master.dbo.spt_values v
+        WHERE v.type = 'P'
+          AND DATEADD(DAY, v.number, wp.FromDate) <= wp.ToDate
+          AND DATENAME(WEEKDAY, DATEADD(DAY, v.number, wp.FromDate)) NOT IN ('Saturday','Sunday')
+    ) d
+),
+WeeklyStatus AS (
+    SELECT
+        tb.Emp_ID,
+        tb.FromDate,
+        tb.ToDate,
+        SUM(ISNULL(bd.BookedHours, 0)) AS TotalHours,
+        SUM(CASE 
+                WHEN ISNULL(tb.PMApproval, 0) = 1 
+                     AND ISNULL(tb.DHApproval, 0) = 1 
+                THEN ISNULL(bd.BookedHours, 0) 
+                ELSE 0 
+            END) AS ApprovedHours
+    FROM dbo.TRN_TimeBooking tb
+    JOIN dbo.TRN_BookedDate bd 
+        ON tb.TimeBooking_Id = bd.TimeBooking_Id
+    GROUP BY tb.Emp_ID, tb.FromDate, tb.ToDate
+)
+
+
+SELECT
+    mu.EmpNo AS Emp_ID,
+    tb.TimeBooking_Id AS TimesheetNo,
+    dhUser.EmployeeName AS ApproverHHName,
+    pmUser.EmployeeName AS ApproverPMName,
+    mu.EmployeeName AS EmployeeName,
+    mu.UserType AS EmployeeType,
+    mu.EmpDept AS Department,
+    CAST(wp.FromDate AS DATE) as FromDate,
+    CAST(wp.ToDate AS DATE) AS ToDate,
+    CAST(wd.Date AS DATE) AS TransactionDate,
+    bd.BookedHours,
+    tb.ProjectNo,
+    pb.ProjectDescription AS ProjectDescription,
+    tb.WBSNo,
+    pb.WBSDescription,
+    tb.PO,
+    CAST(tb.BookedOn AS DATE) AS BookedOn,
+    lr.Rate AS [LabourRate],
+    CASE 
+        WHEN tb.TimeBooking_Id IS NULL THEN 'Not Booked'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours >= ws.TotalHours AND bd.BookedHours > 0
+             THEN 'Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 1 AND tb.PMApproval = 1 AND bd.BookedHours > 0
+             THEN 'Partially Approved'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 0 AND tb.IsSubmitted = 1 AND bd.BookedHours > 0
+             THEN 'Pending with HH'
+        WHEN ws.TotalHours > 0 AND ws.ApprovedHours < ws.TotalHours 
+             AND tb.DHApproval = 1 AND (tb.PMApproval IS NULL OR tb.PMApproval = 0) AND bd.BookedHours > 0
+             THEN 'Pending with PM'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.PMRemark,'') <> '' THEN 'PM rejected'
+        WHEN tb.IsRejected = 1 AND ISNULL(tb.DHRemark,'') <> '' THEN 'HH rejected'
+        WHEN tb.IsSubmitted = 0 THEN 'Draft'
+        ELSE 'Unknown'
+    END AS Status,
+    CAST(GETDATE() AS DATE) AS ReportDate,
+    FORMAT(GETDATE(), 'hh:mm tt') AS ReportTime,
+    wp.Month AS Month
+INTO #Stage
+FROM dbo.MST_User mu
+CROSS JOIN WeekPeriods wp
+JOIN WeekDays wd ON wd.FromDate = wp.FromDate AND wd.ToDate = wp.ToDate
+LEFT JOIN dbo.TRN_TimeBooking tb 
+    ON mu.EmpNo = tb.Emp_ID AND tb.FromDate = wp.FromDate AND tb.ToDate = wp.ToDate
+LEFT JOIN dbo.TRN_BookedDate bd 
+    ON tb.TimeBooking_Id = bd.TimeBooking_Id AND bd.Date = wd.Date
+	--And tb.FromDate BETWEEN  @FromDate  AND  @ToDate
+LEFT JOIN dbo.Budget pb ON tb.ProjectNo = pb.Projectcode AND tb.WBSNo = pb.WBSNumber
+LEFT JOIN dbo.MST_User dhUser ON tb.ApprovedByDH = dhUser.EmpNo
+LEFT JOIN dbo.MST_User pmUser ON tb.ApprovedByPM = pmUser.EmpNo
+LEFT JOIN dbo.MST_LabourRate lr 
+    ON lr.Department = mu.EmpDept AND lr.EmployeeType = mu.UserType AND lr.Grade = mu.EmpGrade
+   AND tb.BookedOn >= lr.FromDate AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
+LEFT JOIN WeeklyStatus ws ON ws.Emp_ID = tb.Emp_ID AND ws.FromDate = tb.FromDate AND ws.ToDate = tb.ToDate
+WHERE mu.InactiveDate IS NULL or mu.InactiveDate >GETDATE() --And tb.FromDate BETWEEN  @FromDate  AND  @ToDate--AND mu.EmpNo='950228';
+
+truncate table timedata
+
+INSERT INTO TimeData
+SELECT *
+FROM #Stage
+WHERE BookedHours > 0 AND Status <> 'Unknown';
+
+INSERT INTO TimeData
+SELECT 
+    s.Emp_ID,
+    NULL AS TimesheetNo,
+    NULL AS ApproverHHName,
+    NULL AS ApproverPMName,
+    s.EmployeeName,
+    s.EmployeeType,
+    s.Department,
+    s.FromDate,
+    s.ToDate,
+    s.TransactionDate,
+    8 AS BookedHours,
+    NULL AS ProjectNo,
+    NULL AS ProjectDescription,
+    NULL AS WBSNo,
+    NULL AS WBSDescription,
+    NULL AS PO,
+    NULL AS BookedOn,
+    NULL AS LabourRate,
+    'Not Booked' AS Status,
+    CAST(GETDATE() AS DATE) AS ReportDate,
+    FORMAT(GETDATE(), 'hh:mm tt') AS Reportime,
+    s.Month
+FROM (
+    SELECT DISTINCT Emp_ID, EmployeeName, EmployeeType, Department,
+           FromDate, ToDate, TransactionDate, Month
+    FROM #Stage
+) s
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM TimeData td
+    WHERE td.Emp_ID = s.Emp_ID
+      AND CAST(td.TransactionDate AS DATE) = CAST(s.TransactionDate AS DATE)
+);
+
+SELECT * FROM TimeData where TransactionDate BETWEEN @FromDate AND @ToDate --@FromDate  AND  @ToDate
+
+ORDER BY EmployeeName, FromDate, TransactionDate;
+END
+GO
+
+
