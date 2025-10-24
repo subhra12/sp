@@ -1,3 +1,26 @@
+
+DECLARE @StartDATE date;
+DECLARE @EndDATE date;
+Declare @Emp_ID int=null;
+
+set @StartDATE='2025-06-01';
+set @EndDATE='2025-06-31';
+
+SElECT  tb.Department,dh.Dep_HeadName,
+		LEFT(DATENAME(MONTH, @StartDATE), 3)+'-'+Convert(varchar,Year(@StartDATE)) as 'Month',tb.EmployeeName,
+		sum(tbd.BookedHours) as DHUnapproved
+		from TRN_TimeBooking tb  
+		inner join TRN_BookedDate tbd on tb.TimeBooking_Id= tbd.TimeBooking_Id
+		inner join MST_DeptHead DH ON DH.Department=tb.Department
+		where  
+		cast(tbd.Date as date) BETWEEN  @StartDATE  AND  @EndDATE
+		and tb.issubmitted=1 and tb.DHApproval=0 and IsRejected=0
+		and dh.EmployeeNo= CASE WHEN @Emp_ID IS NULL THEN dh.EmployeeNo ELSE @Emp_ID END
+		group by tb.Department,dh.Dep_HeadName,tb.EmployeeName
+
+
+
+
 USE [TimeBooking_Dev]
 GO
 
@@ -177,5 +200,6 @@ SELECT * FROM TimeData where TransactionDate BETWEEN @FromDate AND @ToDate --@Fr
 ORDER BY EmployeeName, FromDate, TransactionDate;
 END
 GO
+
 
 
