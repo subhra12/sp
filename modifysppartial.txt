@@ -1,30 +1,7 @@
-
-DECLARE @StartDATE date;
-DECLARE @EndDATE date;
-Declare @Emp_ID int=null;
-
-set @StartDATE='2025-06-01';
-set @EndDATE='2025-06-31';
-
-SElECT  tb.Department,dh.Dep_HeadName,
-		LEFT(DATENAME(MONTH, @StartDATE), 3)+'-'+Convert(varchar,Year(@StartDATE)) as 'Month',tb.EmployeeName,
-		sum(tbd.BookedHours) as DHUnapproved
-		from TRN_TimeBooking tb  
-		inner join TRN_BookedDate tbd on tb.TimeBooking_Id= tbd.TimeBooking_Id
-		inner join MST_DeptHead DH ON DH.Department=tb.Department
-		where  
-		cast(tbd.Date as date) BETWEEN  @StartDATE  AND  @EndDATE
-		and tb.issubmitted=1 and tb.DHApproval=0 and IsRejected=0
-		and dh.EmployeeNo= CASE WHEN @Emp_ID IS NULL THEN dh.EmployeeNo ELSE @Emp_ID END
-		group by tb.Department,dh.Dep_HeadName,tb.EmployeeName
-
-
-
-
 USE [TimeBooking_Dev]
 GO
 
-/****** Object:  StoredProcedure [dbo].[EMPLOYEESTATUSDRAFT01092025]    Script Date: 24-09-2025 21:14:10 ******/
+/****** Object:  StoredProcedure [dbo].[EMPLOYEESTATUSDRAFT24092025]    Script Date: 11-03-2026 15:10:32 ******/
 SET ANSI_NULLS ON
 GO
 
@@ -33,11 +10,13 @@ GO
 
 
 
-
 --exec EMPLOYEESTATUSDRAFT01092025 '2025-09-01 09:30:00.000','2025-09-03 09:30:00.000'
---exec EMPLOYEESTATUSDRAFT10092025 '09-01-2025 09:30:00.000','09-04-2025 09:30:00.000'
+--exec EMPLOYEESTATUSDRAFT24092025 '01-12-2025 09:30:00.000','11-02-2025 09:30:00.000'
+--EMPLOYEESTATUSDRAFT15022026bak
+--exec EMPLOYEESTATUSDRAFT15022026bak '01-12-2025 09:30:00.000','11-02-2025 09:30:00.000'
+--EMPLOYEESTATUSDRAFT24092025
 
-ALTER procedure [dbo].[EMPLOYEESTATUSDRAFT01092025]
+ALTER procedure [dbo].[EMPLOYEESTATUSDRAFT24092025]
 
 @FromDate Datetime,                          
 @ToDate Datetime
@@ -150,7 +129,7 @@ LEFT JOIN dbo.MST_LabourRate lr
     ON lr.Department = mu.EmpDept AND lr.EmployeeType = mu.UserType AND lr.Grade = mu.EmpGrade
    AND tb.BookedOn >= lr.FromDate AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
 LEFT JOIN WeeklyStatus ws ON ws.Emp_ID = tb.Emp_ID AND ws.FromDate = tb.FromDate AND ws.ToDate = tb.ToDate
-WHERE mu.InactiveDate IS NULL or mu.InactiveDate >GETDATE() --And tb.FromDate BETWEEN  @FromDate  AND  @ToDate--AND mu.EmpNo='950228';
+WHERE mu.CreatedOn>=CAST(wd.Date AS DATE) and mu.InactiveDate IS NULL or mu.InactiveDate >=CAST(wd.Date AS DATE) --And tb.FromDate BETWEEN  @FromDate  AND  @ToDate--AND mu.EmpNo='950228';
 
 truncate table timedata
 
@@ -178,7 +157,11 @@ SELECT
     NULL AS WBSDescription,
     NULL AS PO,
     NULL AS BookedOn,
-    NULL AS LabourRate,
+    (select top 1 lr.Rate from dbo.MST_LabourRate lr left join MST_User mu
+    ON  lr.Department = mu.EmpDept AND lr.EmployeeType = mu.UserType AND lr.Grade = mu.EmpGrade 
+	AND(s.TransactionDate >= lr.FromDate AND (lr.ToDate IS NULL OR s.TransactionDate <= lr.ToDate))
+	where mu.EmpNo=s.Emp_ID
+   ) AS LabourRate,
     'Not Booked' AS Status,
     CAST(GETDATE() AS DATE) AS ReportDate,
     FORMAT(GETDATE(), 'hh:mm tt') AS Reportime,
@@ -195,11 +178,10 @@ WHERE NOT EXISTS (
       AND CAST(td.TransactionDate AS DATE) = CAST(s.TransactionDate AS DATE)
 );
 
-SELECT * FROM TimeData where TransactionDate BETWEEN @FromDate AND @ToDate --@FromDate  AND  @ToDate
+SELECT * FROM TimeData where TransactionDate BETWEEN @FromDate AND @ToDate and EmployeeType in('Onroll','Offroll') and LabourRate>=0  --@FromDate  AND  @ToDate
 
 ORDER BY EmployeeName, FromDate, TransactionDate;
 END
 GO
-
 
 
