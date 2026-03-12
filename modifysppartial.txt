@@ -1,7 +1,7 @@
 USE [TimeBooking_Dev]
 GO
 
-/****** Object:  StoredProcedure [dbo].[EMPLOYEESTATUSDRAFT24092025]    Script Date: 11-03-2026 15:10:32 ******/
+/****** Object:  StoredProcedure [dbo].[EMPLOYEESTATUSDRAFT24092025]    Script Date: 12-03-2026 09:58:24 ******/
 SET ANSI_NULLS ON
 GO
 
@@ -10,8 +10,9 @@ GO
 
 
 
+
 --exec EMPLOYEESTATUSDRAFT01092025 '2025-09-01 09:30:00.000','2025-09-03 09:30:00.000'
---exec EMPLOYEESTATUSDRAFT24092025 '01-12-2025 09:30:00.000','11-02-2025 09:30:00.000'
+--exec EMPLOYEESTATUSDRAFT24092025 '01-12-2025 09:30:00.000','11-02-2026 09:30:00.000'
 --EMPLOYEESTATUSDRAFT15022026bak
 --exec EMPLOYEESTATUSDRAFT15022026bak '01-12-2025 09:30:00.000','11-02-2025 09:30:00.000'
 --EMPLOYEESTATUSDRAFT24092025
@@ -112,7 +113,9 @@ SELECT
     END AS Status,
     CAST(GETDATE() AS DATE) AS ReportDate,
     FORMAT(GETDATE(), 'hh:mm tt') AS ReportTime,
-    wp.Month AS Month
+    wp.Month AS Month,
+	--ADD BILLABLE TYPE
+	CASE WHEN ISNULL(lr.Rate,0)>0 THEN 'Billable' ELSE 'Non-Billable' END AS BillableType
 INTO #Stage
 FROM dbo.MST_User mu
 CROSS JOIN WeekPeriods wp
@@ -129,7 +132,7 @@ LEFT JOIN dbo.MST_LabourRate lr
     ON lr.Department = mu.EmpDept AND lr.EmployeeType = mu.UserType AND lr.Grade = mu.EmpGrade
    AND tb.BookedOn >= lr.FromDate AND (lr.ToDate IS NULL OR tb.BookedOn <= lr.ToDate)
 LEFT JOIN WeeklyStatus ws ON ws.Emp_ID = tb.Emp_ID AND ws.FromDate = tb.FromDate AND ws.ToDate = tb.ToDate
-WHERE mu.CreatedOn>=CAST(wd.Date AS DATE) and mu.InactiveDate IS NULL or mu.InactiveDate >=CAST(wd.Date AS DATE) --And tb.FromDate BETWEEN  @FromDate  AND  @ToDate--AND mu.EmpNo='950228';
+WHERE CAST(wd.Date AS DATE)>=CAST(mu.CreatedOn AS DATE) and (mu.InactiveDate IS NULL or mu.InactiveDate >=CAST(wd.Date AS DATE)) --And tb.FromDate BETWEEN  @FromDate  AND  @ToDate--AND mu.EmpNo='950228';
 
 truncate table timedata
 
@@ -165,10 +168,15 @@ SELECT
     'Not Booked' AS Status,
     CAST(GETDATE() AS DATE) AS ReportDate,
     FORMAT(GETDATE(), 'hh:mm tt') AS Reportime,
-    s.Month
+    s.Month,
+	CASE WHEN (select top 1 lr.Rate from dbo.MST_LabourRate lr left join MST_User mu
+    ON  lr.Department = mu.EmpDept AND lr.EmployeeType = mu.UserType AND lr.Grade = mu.EmpGrade 
+	AND(s.TransactionDate >= lr.FromDate AND (lr.ToDate IS NULL OR s.TransactionDate <= lr.ToDate))
+	where mu.EmpNo=s.Emp_ID
+   )>0 THEN 'Billable' ELSE 'Non-Billable' END AS BillableType
 FROM (
     SELECT DISTINCT Emp_ID, EmployeeName, EmployeeType, Department,
-           FromDate, ToDate, TransactionDate, Month
+           FromDate, ToDate, TransactionDate, Month,BillableType
     FROM #Stage
 ) s
 WHERE NOT EXISTS (
