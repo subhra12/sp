@@ -1,12 +1,127 @@
 USE [TimeBooking_Dev]
 GO
+/****** Object:  StoredProcedure [dbo].[sp_UnApprovedHours_PM]    Script Date: 19-03-2026 10:19:09 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
 
-/****** Object:  StoredProcedure [dbo].[EMPLOYEESTATUSDRAFT24092025]    Script Date: 12-03-2026 09:58:24 ******/
+-- ====================================================================                                                    
+-- Author:Kavita Adep                                       
+-- Create date:02-02-24                              
+-- Description:  This procedure is to Retrieve Month wise PM UnApproved hours
+-- ====================================================================          
+
+-- [sp_UnApprovedHours_PM] null,'2025-04-04','2026-03-31'      
+
+ALTER PROCEDURE [dbo].[sp_UnApprovedHours_PM] 
+@Emp_ID INT=null, 
+@sDate Datetime,                          
+@eDate Datetime
+AS                              
+BEGIN						          
+
+IF OBJECT_ID(N'tempdb..#TempDates') IS NOT NULL
+BEGIN
+DROP TABLE #TempDates
+END
+
+IF OBJECT_ID(N'tempdb..#TempDetails') IS NOT NULL
+BEGIN
+DROP TABLE #TempDetails
+END
+
+
+select  @eDate = case when @eDate is null then GETDATE() else @eDate end
+
+;with cte as (
+  select convert(date,@sDate) startDate,
+         month(@sdate) n
+  union all
+  select dateadd(month,n,convert(date,convert(varchar,year(@sdate)) + '0101')) startDate,
+        (n+1) n
+  from cte
+  where n < month(@sdate) + datediff(month,@sdate,@edate)
+)
+SELECT * into #TempDates from
+(select startdate,cast (case when Month(startDate)=Month(@eDate)  and year(startDate)=year(@eDate) then @eDate else 
+DATEADD(d, -1, DATEADD(m, DATEDIFF(m, 0, startDate) + 1, 0))  end as date) enddate
+from cte ) as x
+
+--select * from #TempDates
+
+CREATE TABLE #TempDetails (
+	ProjectNo varchar(50),
+	ProjectName varchar(50),
+	PM varchar(50),
+	PMEmployeecode varchar(50),
+	Month varchar(10),
+	EmployeeName varchar(50),
+	EmployeeCode varchar(50),
+	UnapprovedHours decimal(18,2),
+)
+
+DECLARE Cur_1 CURSOR
+    FOR SELECT * FROM #TempDates
+
+
+OPEN Cur_1
+DECLARE @StartDATE date
+DECLARE @EndDATE date
+FETCH NEXT FROM Cur_1 
+INTO @StartDATE, @EndDATE
+
+    WHILE (@@FETCH_STATUS = 0)
+        BEGIN
+		insert into #tempdetails  
+		SElECT  tb.ProjectNo,BD.ProjectDescription,
+
+		case when BD.WBSPersonResponsible is null or BD.WBSPersonResponsible=0 then BD.ProjectPersonResponsibleName
+		else BD.WBSPersonResponsibleName end as WBSPersonResponsibleName,
+		
+		case when BD.WBSPersonResponsible is null or BD.WBSPersonResponsible=0 then BD.ProjectPersonResponsible
+		else BD.WBSPersonResponsible end as WBSPersonResponsiblecode,
+
+		LEFT(DATENAME(MONTH, @StartDATE), 3)+'-'+Convert(varchar,Year(@StartDATE)) as 'Month',tb.EmployeeName,tb.Emp_Id,
+		sum(tbd.BookedHours) as DHUnapproved	
+		from TRN_TimeBooking tb  
+		inner join TRN_BookedDate tbd on tb.TimeBooking_Id= tbd.TimeBooking_Id
+		inner join Budget BD on BD.Projectcode=tb.ProjectNo and bd.WBSnumber=tb.WBSNo
+		where  
+		cast(tbd.Date as date) BETWEEN  @StartDATE  AND  @EndDATE
+		and tb.issubmitted=1 and tb.PMApproval=0 and tb.dhapproval=1 and isrejected=0
+		and (@Emp_ID is null or  (((BD.WBSPersonResponsible IS NULL OR BD.WBSPersonResponsible = 0) AND BD.ProjectPersonResponsible = @Emp_ID )
+         OR (BD.WBSPersonResponsible = @Emp_ID )))
+		--BD.WBSPersonResponsible= CASE WHEN @Emp_ID IS NULL THEN BD.WBSPersonResponsible ELSE @Emp_ID END
+		group by tb.ProjectNo,BD.ProjectDescription,
+		case when BD.WBSPersonResponsible is null or BD.WBSPersonResponsible=0 then BD.ProjectPersonResponsibleName
+		else BD.WBSPersonResponsibleName end ,
+		case when BD.WBSPersonResponsible is null or BD.WBSPersonResponsible=0 then BD.ProjectPersonResponsible
+		else BD.WBSPersonResponsible end ,
+		tb.EmployeeName,tb.Emp_Id
+
+	FETCH NEXT FROM Cur_1 INTO @StartDATE, @EndDATE
+        END
+CLOSE Cur_1
+
+select * from #TempDetails order by EmployeeName,Month
+DEALLOCATE Cur_1
+
+
+END         
+
+
+-----EmployeeStatus sp
+USE [TimeBooking_Dev]
+GO
+
+/****** Object:  StoredProcedure [dbo].[EMPLOYEESTATUSDRAFT24092025]    Script Date: 19-03-2026 10:12:24 ******/
 SET ANSI_NULLS ON
 GO
 
 SET QUOTED_IDENTIFIER ON
 GO
+
 
 
 
@@ -17,7 +132,7 @@ GO
 --exec EMPLOYEESTATUSDRAFT15022026bak '01-12-2025 09:30:00.000','11-02-2025 09:30:00.000'
 --EMPLOYEESTATUSDRAFT24092025
 
-ALTER procedure [dbo].[EMPLOYEESTATUSDRAFT24092025]
+CREATE procedure [dbo].[EMPLOYEESTATUSDRAFT24092025]
 
 @FromDate Datetime,                          
 @ToDate Datetime
@@ -186,10 +301,19 @@ WHERE NOT EXISTS (
       AND CAST(td.TransactionDate AS DATE) = CAST(s.TransactionDate AS DATE)
 );
 
-SELECT * FROM TimeData where TransactionDate BETWEEN @FromDate AND @ToDate and EmployeeType in('Onroll','Offroll') and LabourRate>=0  --@FromDate  AND  @ToDate
+SELECT * FROM TimeData where TransactionDate BETWEEN @FromDate AND @ToDate and EmployeeType in('Onroll','Offroll') and LabourRate>=0 
+AND NOT(EmployeeType='Offroll' and BillableType='Non-Billable')
+--@FromDate  AND  @ToDate
 
 ORDER BY EmployeeName, FromDate, TransactionDate;
 END
 GO
 
 
+
+    
+    
+      
+      
+                  
+       
